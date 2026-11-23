@@ -9,8 +9,10 @@ import {
   ERR_POST_IA_DOM_MUTATED,
   ERR_POST_IA_EMPTY_AFTER_SANITIZE,
   ERR_POST_IA_EMPTY_HTML,
+  ERR_POST_IA_EMPTY_JSON,
   ERR_POST_IA_MISSING_PAYLOAD,
   ERR_POST_IA_RESIDUAL_VARS,
+  ERR_POST_IA_SCHEMA_MISMATCH,
   ERR_POST_IA_UNSUPPORTED_TAGS,
   PostIaSanitizerStrategy,
 } from './post-ia-sanitizer.strategy';
@@ -653,7 +655,7 @@ describe('PostIaSanitizerStrategy', () => {
   });
 
   describe('7. Inventario de salida (outputFields)', () => {
-    it('7.1 deberia declarar las seis claves del namespace', () => {
+    it('7.1 deberia declarar las siete claves del namespace', () => {
       // 1. Arrange & 2. Act ⚙️
       const strategy = buildStrategy();
 
@@ -665,6 +667,7 @@ describe('PostIaSanitizerStrategy', () => {
         'sanitized_at',
         'validated_fields',
         'validated_items',
+        'validated_json',
       ]);
     });
 
@@ -1217,6 +1220,276 @@ describe('PostIaSanitizerStrategy', () => {
           '<h5 class="panel-title">',
         );
       });
+    });
+  });
+
+  describe('12. Modo JSON: datos estructurados (Cerrar licitacion)', () => {
+    /** El esquema que siembra la 069 en el maestro de cierre. */
+    const CLOSING_SCHEMA = {
+      type: 'object',
+      required: ['headline'],
+      properties: {
+        headline: { type: 'string', minLength: 1 },
+        summary: { type: 'string' },
+        body_paragraphs: { type: 'array', items: { type: 'string' } },
+      },
+    };
+
+    /** Telemetria que el PROCESADOR_IA publica siempre junto a los datos. */
+    const METADATA = { provider: 'ANTHROPIC', totalTokens: 2597 };
+
+    it('12.1 deberia validar y serializar un JSON sin body_paragraphs ni markup', async () => {
+      // 1. Arrange 📐: la salida de un flujo de extraccion de expedientes.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: 'EXP-2026-041',
+        summary: 'Suministro de equipos',
+        items: [],
+        metadata: METADATA,
+        resolved_cardinality: 'SINGLE',
+      });
+      const before = structuredClone(context.getAllContext());
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, { contentMode: 'JSON' });
+
+      // 3. Assert 🎯: exito, sin EMPTY_HTML, el objeto saneado sin las claves
+      //    tecnicas y el contexto de entrada intacto.
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(result.data?.validated_json).toEqual({
+        headline: 'EXP-2026-041',
+        summary: 'Suministro de equipos',
+      });
+      expect(result.data?.validated_fields).toEqual({
+        headline: 'EXP-2026-041',
+        summary: 'Suministro de equipos',
+      });
+      expect(result.data?.validated_markup).toBe('');
+      expect(result.data?.audit_status).toBe('PASSED');
+      expect(result.data?.validated_items).toEqual([]);
+      expect(context.getAllContext()).toEqual(before);
+    });
+
+    it.each([
+      ['un objeto vacio', {}],
+      [
+        'todos los campos en blanco',
+        { headline: '', summary: '   ', body_paragraphs: [], extra: null },
+      ],
+      ['solo claves tecnicas', { metadata: METADATA, items: [] }],
+      ['colecciones vacias anidadas', { datos: { lista: [[], {}] } }],
+    ])(
+      '12.2 deberia detenerse con ERR_POST_IA_EMPTY_JSON ante %s',
+      async (_label, payload) => {
+        // 1. Arrange 📐
+        const strategy = buildStrategy();
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(payload), {
+          contentMode: 'JSON',
+        });
+
+        // 3. Assert 🎯: GRAVE controlado, no EMPTY_HTML, no excepcion.
+        expect(result.success).toBe(false);
+        expect(result.error?.level).toBe('GRAVE');
+        expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_JSON);
+        expect(result.error?.missingFields).toEqual([SOURCE_NAMESPACE]);
+      },
+    );
+
+    it('12.3 deberia parar el caso real: sin expediente pero con body_paragraphs, el esquema lo rechaza', async () => {
+      // 1. Arrange 📐: la ejecucion de desarrollo del 2026-11-23. El correo no
+      //    traia expediente; el modelo dejo headline vacio y extrajo el resto.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: '',
+        summary: '',
+        items: [],
+        filled_markup: null,
+        body_paragraphs: [
+          'fecha_cierre: 2026-09-21T14:00',
+          'enlace_consulta: https://portal.example/convocatorias#collapse2',
+        ],
+        metadata: METADATA,
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        contentMode: 'JSON',
+        jsonSchema: CLOSING_SCHEMA,
+      });
+
+      // 3. Assert 🎯: se para EN EL ESCUDO nombrando el campo, no en Drupal.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_POST_IA_SCHEMA_MISMATCH);
+      expect(result.error?.missingFields).toEqual(['llm_response.headline']);
+      expect(result.error?.message).toContain('llm_response.headline');
+    });
+
+    it('12.4 deberia aplicar el esquema sobre el objeto YA saneado', async () => {
+      // 1. Arrange 📐: un headline que solo son etiquetas no cumple minLength
+      //    tras sanear, aunque en bruto tuviera caracteres.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: '<script>alert(1)</script>',
+        summary: 'Objeto',
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        contentMode: 'JSON',
+        jsonSchema: CLOSING_SCHEMA,
+      });
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_SCHEMA_MISMATCH);
+      expect(result.error?.missingFields).toEqual(['llm_response.headline']);
+    });
+
+    it('12.5 deberia sanear en profundidad las cadenas y conservar el resto de tipos', async () => {
+      // 1. Arrange 📐: XSS, entidades y caracteres de control en arreglos y
+      //    objetos anidados, junto a numeros, booleanos y null.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: '<b>EXP-2026-041</b>',
+        importe: 1250.5,
+        adjudicada: true,
+        adjudicatario: null,
+        body_paragraphs: [
+          'objeto: Equipos &amp; licencias',
+          '<img src=x onerror=alert(1)>estado: adjudicada',
+        ],
+        detalle: { nota: 'linea\u0007uno\nlinea dos', lotes: [1, 2] },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        contentMode: 'JSON',
+        jsonSchema: CLOSING_SCHEMA,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_json).toEqual({
+        headline: 'EXP-2026-041',
+        importe: 1250.5,
+        adjudicada: true,
+        adjudicatario: null,
+        body_paragraphs: ['objeto: Equipos & licencias', 'estado: adjudicada'],
+        detalle: { nota: 'lineauno\nlinea dos', lotes: [1, 2] },
+      });
+      // `validated_fields` solo lleva las cadenas de primer nivel.
+      expect(result.data?.validated_fields).toEqual({
+        headline: 'EXP-2026-041',
+      });
+    });
+
+    it('12.6 deberia rechazar un marcador sin resolver anidado', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: 'EXP-1',
+        body_paragraphs: ['enlace: {{parsed_email.enlace}}'],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, { contentMode: 'JSON' });
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_RESIDUAL_VARS);
+      expect(result.error?.missingFields).toEqual(['{{parsed_email.enlace}}']);
+    });
+
+    it('12.7 deberia auditar cada elemento del lote con el mismo esquema', async () => {
+      // 1. Arrange 📐: dos expedientes; el segundo sin codigo.
+      const strategy = buildStrategy();
+      const ok = buildContext({
+        headline: 'LIC-2026-004',
+        items: [{ headline: 'LIC-2026-005', summary: 'Cinco' }],
+      });
+      const broken = buildContext({
+        headline: 'LIC-2026-004',
+        items: [{ headline: '', summary: 'Sin codigo' }],
+      });
+      const params = { contentMode: 'JSON', jsonSchema: CLOSING_SCHEMA };
+
+      // 2. Act ⚙️
+      const okResult = await strategy.execute(ok, params);
+      const brokenResult = await strategy.execute(broken, params);
+
+      // 3. Assert 🎯: el lote publica validated_fields y validated_json por
+      //    elemento; uno roto detiene el nodo con su ruta exacta.
+      expect(okResult.data?.validated_items).toEqual([
+        {
+          validated_markup: '',
+          validated_fields: { headline: 'LIC-2026-005', summary: 'Cinco' },
+          validated_json: { headline: 'LIC-2026-005', summary: 'Cinco' },
+          character_count: expect.any(Number) as number,
+        },
+      ]);
+      expect(brokenResult.error?.code).toBe(ERR_POST_IA_SCHEMA_MISMATCH);
+      expect(brokenResult.error?.missingFields).toEqual([
+        'llm_response.items[0].headline',
+      ]);
+    });
+
+    it('12.8 deberia rechazar un jsonSchema que no compila como ERR_POST_IA_CONFIG', async () => {
+      // 1. Arrange 📐: palabra clave mal escrita; con `strict` no se tolera.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ headline: 'EXP-1' }),
+        {
+          contentMode: 'JSON',
+          jsonSchema: { type: 'object', requried: ['x'] },
+        },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_POST_IA_CONFIG);
+    });
+
+    it('12.9 TEXT: deberia seguir lanzando EMPTY_HTML con body_paragraphs vacio y serializar con campos poblados', async () => {
+      // 1. Arrange 📐: regresion del modo TEXT, tambien con el arreglo que se
+      //    configuro a mano en el flujo real (TEXT solo audita cadenas).
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const emptyArray = await strategy.execute(
+        buildContext({ headline: 'EXP-1', body_paragraphs: [] }),
+        { contentMode: 'TEXT', sourceFields: ['body_paragraphs'] },
+      );
+      const populated = await strategy.execute(
+        buildContext({ headline: 'EXP-1', summary: 'Objeto' }),
+        { contentMode: 'TEXT' },
+      );
+
+      // 3. Assert 🎯
+      expect(emptyArray.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+      expect(populated.success).toBe(true);
+      expect(populated.data?.validated_fields).toEqual({
+        headline: 'EXP-1',
+        summary: 'Objeto',
+      });
+      expect(populated.data?.validated_json).toEqual({});
+    });
+
+    it('12.10 HTML: deberia seguir lanzando EMPTY_HTML sin markup', async () => {
+      // 1. Arrange 📐: regresion del modo HTML con el payload del cierre.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ headline: 'EXP-1', filled_markup: null }),
+        { contentMode: 'HTML' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
     });
   });
 });

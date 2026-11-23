@@ -591,6 +591,40 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       );
     });
 
+    it('14.4ter deberia validar el cierre como JSON exigiendo headline, con el prompt intacto', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: escudo del maestro de cierre (paso 6i) y
+      //    prompt de cierre.
+      const escudo = blueprintBySlug('wf-licitacion-cerrar')
+        .configuracion_pipeline.nodes['escudo'];
+      const [prompt] = await dataSource.query<{ texto_prompt: string }[]>(
+        `SELECT texto_prompt FROM plantillas_prompts_ia
+          WHERE codigo = 'LICITACION_CIERRE_DEFAULT'`,
+      );
+      const text = prompt?.texto_prompt ?? '';
+
+      // 3. Assert 🎯: modo JSON con `headline` obligatorio y no vacio.
+      expect(escudo?.params).toMatchObject({
+        contentMode: 'JSON',
+        sourceNamespace: 'llm_response',
+        jsonSchema: {
+          required: ['headline'],
+          properties: { headline: { type: 'string', minLength: 1 } },
+        },
+      });
+      // El asterisco es la marca OBLIGATORIA del motor (pausa antes de llamar
+      // al modelo si falta el cuerpo), no un error: se conserva.
+      expect(text).toContain('{{*parsed_email.clean_body}}');
+      expect(text).toContain('{{parsed_email.extracted_documents_text}}');
+      expect(text).toContain('{{ocr_result.clean_body}}');
+      expect(text).not.toContain('{{**');
+      // Toda marca del prompt esta bien formada: `{{` + `*` opcional + ruta.
+      const markers = text.match(/\{\{[^}]*\}\}/g) ?? [];
+      expect(markers.length).toBeGreaterThan(0);
+      for (const marker of markers) {
+        expect(marker).toMatch(/^\{\{\*?[a-z0-9_]+\.[a-z0-9_]+\}\}$/);
+      }
+    });
+
     it('14.5 deberia consolidar los prompts de Notiweb y de titulos una sola vez', async () => {
       // 1. Arrange 📐 + 2. Act ⚙️
       const rows = await dataSource.query<

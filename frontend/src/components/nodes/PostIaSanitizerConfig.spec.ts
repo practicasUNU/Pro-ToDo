@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBanner, QBtn, QBtnToggle, QIcon, QSelect, Quasar } from 'quasar';
+import { QBanner, QBtn, QIcon, QSelect, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import PostIaSanitizerConfig from '@components/nodes/PostIaSanitizerConfig.vue';
@@ -25,7 +25,7 @@ const NODE_ID = 'nodo_escudo';
  * Se registran a mano porque el plugin `Quasar` instala directivas y plugins
  * pero NO componentes.
  */
-const QUASAR_COMPONENTS = { QBanner, QBtn, QBtnToggle, QIcon, QSelect };
+const QUASAR_COMPONENTS = { QBanner, QBtn, QIcon, QSelect };
 
 const UPSTREAM: UpstreamNamespace[] = [
   {
@@ -411,6 +411,63 @@ describe('PostIaSanitizerConfig · configurador del nodo ESCUDO_POST_IA', () => 
       expect(wrapper.find('[data-test="required-selectors-field"]').exists()).toBe(false);
       expect(wrapper.find('[data-test="allowed-tags-field"]').exists()).toBe(false);
       expect(wrapper.find('[data-test="text-mode-notice"]').exists()).toBe(true);
+    });
+  });
+
+  describe('10. Modo JSON', () => {
+    it('10.1 deberia ofrecer los tres modos en un QSelect cerrado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent();
+      const options = selectByField(wrapper, 'content-mode-field').props('options') as Array<{
+        label: string;
+        value: string;
+      }>;
+
+      // 3. Assert 🎯: lista cerrada, sin texto libre.
+      expect(options.map((option) => option.value)).toEqual(['HTML', 'TEXT', 'JSON']);
+      expect(options.find((option) => option.value === 'JSON')?.label).toBe(
+        'JSON (Validación y serialización de datos estructurados)',
+      );
+      expect(selectByField(wrapper, 'content-mode-field').props('useInput')).toBe(false);
+    });
+
+    it('10.2 deberia ocultar campos, selectores y etiquetas y mostrar el esquema en solo lectura', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.updateConfig({
+        contentMode: PostIaContentMode.JSON,
+        jsonSchema: { type: 'object', required: ['headline'] },
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="source-namespace-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="source-fields-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="source-field-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="required-selectors-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="allowed-tags-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="json-mode-notice"]').exists()).toBe(true);
+      expect(wrapper.get('[data-test="json-schema-summary"]').text()).toContain('headline');
+    });
+
+    it('10.3 deberia cambiar el modo desde el selector', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+
+      // 2. Act ⚙️
+      selectByField(wrapper, 'content-mode-field').vm.$emit(
+        'update:model-value',
+        PostIaContentMode.JSON,
+      );
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(store.config.contentMode).toBe(PostIaContentMode.JSON);
+      expect(store.isJsonMode).toBe(true);
     });
   });
 });

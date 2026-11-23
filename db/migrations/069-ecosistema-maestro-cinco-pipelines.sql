@@ -65,6 +65,13 @@
 --   6h. El DESTINO_DRUPAL de titulos (maestro y flujos instanciados) pierde el
 --      containerSelector "#accordion": el destino lo decide cada panel por su
 --      #accordion<SIGLAS>, y la raiz solo servia para contaminarla.
+--   6i. El escudo del cierre de licitacion (maestro y flujos con un destino
+--      TRANSFER_HTML_BLOCK) pasa a contentMode "JSON" con un jsonSchema que
+--      exige "headline" no vacio: el cierre extrae datos, no texto ni marcado,
+--      y sin expediente el traslado no puede localizar el bloque. El prompt de
+--      cierre conserva {{*parsed_email.clean_body}}: el asterisco es la marca
+--      obligatoria del motor (pausa antes de llamar al modelo si falta el
+--      cuerpo), no un error de sintaxis.
 --   6f. Escudos de `flujos` y `plantillas_flujo` con el atajo antiguo
 --      "Estructura completa" (sin h2) pasan a la lista canonica.
 --   2b. El catalogo describe el modo campana de DESTINO_ACENS.
@@ -120,6 +127,7 @@ DECLARE
     replaced_old BOOLEAN;
     pair_index INT;
     old_full_structure CONSTANT TEXT[] := ARRAY['a', 'div', 'em', 'h3', 'h4', 'h5', 'hr', 'img', 'li', 'p', 'span', 'strong', 'table', 'td', 'th', 'tr', 'ul'];
+    closing_json_schema CONSTANT JSONB := '{"type": "object", "required": ["headline"], "properties": {"headline": {"type": "string", "minLength": 1}, "summary": {"type": "string"}, "body_paragraphs": {"type": "array", "items": {"type": "string"}}}}'::JSONB;
     canonical_tags CONSTANT JSONB := '["h2", "h3", "h4", "h5", "h6", "p", "a", "b", "i", "strong", "em", "u", "strike", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "hr", "br", "div", "span", "img"]'::JSONB;
     clause_poly_html CONSTANT TEXT := $clause$DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML:
 - La información de entrada puede contener tablas, listas o textos en formato Markdown (| tabla |, # títulos, - listas, **negritas**).
@@ -1473,7 +1481,7 @@ PLANTILLA BASE:
     END IF;
     inserted_id := NULL;
     INSERT INTO plantillas_flujo (nombre, descripcion, activo, configuracion_pipeline, creado_por, actualizado_por)
-    VALUES ('Maestro · Cierre de licitación', '[wf-licitacion-cerrar] Cierre de una convocatoria sin mapeador de plantilla: la IA identifica el expediente, el escudo lo valida como texto y el destino traslada su bloque de la pagina de abiertas a la de cerradas (TRANSFER_HTML_BLOCK).', TRUE,
+    VALUES ('Maestro · Cierre de licitación', '[wf-licitacion-cerrar] Cierre de una convocatoria sin mapeador de plantilla: la IA identifica el expediente, el escudo lo valida como JSON (exige headline) y el destino traslada su bloque de la pagina de abiertas a la de cerradas (TRANSFER_HTML_BLOCK).', TRUE,
             replace(replace(replace(
                 $pipeline${
   "flowId": "wf-licitacion-cerrar",
@@ -1525,12 +1533,29 @@ PLANTILLA BASE:
       "nextStep": "destino_drupal",
       "onErrorStep": "alerta_smtp",
       "params": {
-        "contentMode": "TEXT",
+        "contentMode": "JSON",
         "sourceNamespace": "llm_response",
-        "sourceFields": [
-          "headline",
-          "summary"
-        ]
+        "jsonSchema": {
+          "type": "object",
+          "required": [
+            "headline"
+          ],
+          "properties": {
+            "headline": {
+              "type": "string",
+              "minLength": 1
+            },
+            "summary": {
+              "type": "string"
+            },
+            "body_paragraphs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
       }
     },
     "destino_drupal": {
@@ -2065,6 +2090,62 @@ PLANTILLA BASE:
         VALUES (admin_id, 'ACTUALIZAR', rec.tabla, rec.id::TEXT,
                 jsonb_build_object('containerSelector', '#accordion'),
                 seed_tag || jsonb_build_object('nodo', rec.destino_key, 'parche', 'destino_titulos_sin_raiz'));
+    END LOOP;
+
+    -- 6i. Escudo JSON en el cierre de licitacion ---------------------------
+    -- El cierre extrae datos (expediente, fechas, adjudicacion), no texto ni
+    -- marcado. En TEXT solo se auditan cadenas, y un `body_paragraphs`
+    -- (arreglo) no cabia; en HTML no hay marcado que auditar. El modo JSON
+    -- valida y sanea el objeto entero, y el esquema exige `headline` no vacio:
+    -- sin expediente el destino no puede localizar el bloque, y el flujo debe
+    -- pararse aqui con ERR_POST_IA_SCHEMA_MISMATCH y no en Drupal.
+    --
+    -- Huella del cierre: un ESCUDO_POST_IA en un flujo con un DESTINO_DRUPAL en
+    -- TRANSFER_HTML_BLOCK (el traslado nunca publica marcado). Solo se tocan los
+    -- que aun no estan en JSON; se conserva su `sourceNamespace`. Reejecutar no
+    -- cambia nada.
+    FOR rec IN
+        SELECT f.id_flujo AS id, 'flujos' AS tabla, n.key AS escudo_key, f.configuracion_pipeline
+          FROM flujos f, jsonb_each(f.configuracion_pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA'
+           AND coalesce(n.value #>> '{params,contentMode}', 'HTML') <> 'JSON'
+           AND EXISTS (SELECT 1 FROM jsonb_each(f.configuracion_pipeline->'nodes') d
+                        WHERE d.value->>'nodeType' = 'DESTINO_DRUPAL'
+                          AND d.value #>> '{params,operationMode}' = 'TRANSFER_HTML_BLOCK')
+        UNION ALL
+        SELECT p.id_plantilla_flujo, 'plantillas_flujo', n.key, p.configuracion_pipeline
+          FROM plantillas_flujo p, jsonb_each(p.configuracion_pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA'
+           AND coalesce(n.value #>> '{params,contentMode}', 'HTML') <> 'JSON'
+           AND EXISTS (SELECT 1 FROM jsonb_each(p.configuracion_pipeline->'nodes') d
+                        WHERE d.value->>'nodeType' = 'DESTINO_DRUPAL'
+                          AND d.value #>> '{params,operationMode}' = 'TRANSFER_HTML_BLOCK')
+    LOOP
+        pipeline := jsonb_build_object(
+            'contentMode', 'JSON',
+            'sourceNamespace', coalesce(rec.configuracion_pipeline #>> ARRAY['nodes', rec.escudo_key, 'params', 'sourceNamespace'], 'llm_response'),
+            'jsonSchema', closing_json_schema);
+        IF rec.tabla = 'flujos' THEN
+            UPDATE flujos
+               SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+                       ARRAY['nodes', rec.escudo_key, 'params'], pipeline),
+                   actualizado_por = admin_id,
+                   fecha_actualizacion = NOW()
+             WHERE id_flujo = rec.id;
+            summary := jsonb_set(summary, '{flujos_reparados}', to_jsonb((summary->>'flujos_reparados')::INT + 1));
+        ELSE
+            UPDATE plantillas_flujo
+               SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+                       ARRAY['nodes', rec.escudo_key, 'params'], pipeline),
+                   actualizado_por = admin_id,
+                   fecha_actualizacion = NOW()
+             WHERE id_plantilla_flujo = rec.id;
+            summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        END IF;
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', rec.tabla, rec.id::TEXT,
+                jsonb_build_object('params', rec.configuracion_pipeline #> ARRAY['nodes', rec.escudo_key, 'params']),
+                seed_tag || jsonb_build_object('nodo', rec.escudo_key, 'parche', 'escudo_json_cierre', 'params', pipeline));
     END LOOP;
 
     -- 7. Resumen de la siembra ----------------------------------------------

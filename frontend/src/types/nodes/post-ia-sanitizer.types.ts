@@ -26,12 +26,17 @@ export const DEFAULT_POST_IA_SOURCE_FIELD = 'filled_markup';
  * Que audita el escudo. Replica de `PostIaContentMode`.
  *
  * `TEXT` permite poner el escudo directamente detras de un `PROCESADOR_IA`, sin
- * `MAPEADOR_PLANTILLA`, en los flujos que no maquetan (Cerrar licitacion,
- * Innodays, Innobar): audita campos de texto y les quita toda etiqueta.
+ * `MAPEADOR_PLANTILLA`, en los flujos que no maquetan (Innodays, Innobar):
+ * audita campos de texto y les quita toda etiqueta. Solo cadenas.
+ *
+ * `JSON` valida y sanea el objeto estructurado ENTERO del modelo (cadenas,
+ * arreglos, objetos anidados) y, si el nodo trae `jsonSchema`, lo comprueba con
+ * `ajv` en el backend. Es el modo de Cerrar licitacion.
  */
 export enum PostIaContentMode {
   HTML = 'HTML',
   TEXT = 'TEXT',
+  JSON = 'JSON',
 }
 
 export const DEFAULT_POST_IA_CONTENT_MODE = PostIaContentMode.HTML;
@@ -208,4 +213,10 @@ export interface PostIaSanitizerNodeConfig {
   sourceField: string;
   requiredSelectors: string[];
   allowedTags: string[];
+  /**
+   * Solo modo JSON: el JSON Schema que valida el backend. El asistente no lo
+   * edita, pero lo CONSERVA: perderlo al guardar desde la interfaz dejaria el
+   * cierre de licitacion sin la exigencia de `headline`.
+   */
+  jsonSchema: Record<string, unknown> | null;
 }

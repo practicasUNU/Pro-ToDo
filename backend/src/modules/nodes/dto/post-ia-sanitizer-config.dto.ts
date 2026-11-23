@@ -4,19 +4,28 @@ import {
   IsArray,
   IsEnum,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
+  Validate,
+  ValidatorConstraint,
 } from 'class-validator';
 
 import { OUTPUT_NAMESPACE_PATTERN } from '@core/fsm/types/pipeline-schema.types';
+import { compileJsonSchema } from '@modules/nodes/utils/json-schema.util';
 
 import {
   MAX_ALLOWED_TAGS,
   MAX_REQUIRED_SELECTORS,
   MAX_SELECTOR_LENGTH,
 } from './template-mapper-config.dto';
+
+import type {
+  ValidationArguments,
+  ValidatorConstraintInterface,
+} from 'class-validator';
 
 /**
  * Namespace del que se lee la respuesta del modelo, si el nodo no declara otro.
@@ -59,10 +68,17 @@ const SOURCE_FIELD_PATTERN = /^[a-z0-9_]+$/;
  * - `TEXT`: varios campos de TEXTO del modelo (`headline`, `summary`...),
  *   despojados de TODA etiqueta. Es el que permite poner el escudo detras de un
  *   `PROCESADOR_IA` sin `MAPEADOR_PLANTILLA`, en los flujos que no maquetan.
+ *   Solo audita cadenas: un arreglo como `body_paragraphs` no cabe aqui.
+ * - `JSON`: el objeto ESTRUCTURADO entero del modelo (cadenas, arreglos,
+ *   objetos anidados), saneado en profundidad y, si el nodo declara
+ *   `jsonSchema`, validado con `ajv`. Es el modo de los flujos de extraccion de
+ *   datos —el cierre de licitaciones— donde lo que se publica no es texto ni
+ *   marcado sino un expediente y sus metadatos.
  */
 export enum PostIaContentMode {
   HTML = 'HTML',
   TEXT = 'TEXT',
+  JSON = 'JSON',
 }
 
 export const DEFAULT_POST_IA_CONTENT_MODE = PostIaContentMode.HTML;
@@ -78,6 +94,27 @@ export const MAX_POST_IA_SOURCE_FIELDS = 20;
 
 /** Nombre de etiqueta HTML en minusculas, tal y como lo escribe el saneador. */
 const HTML_TAG_PATTERN = /^[a-z][a-z0-9]*$/;
+
+/**
+ * El `jsonSchema` del nodo tiene que COMPILAR con las opciones del proyecto.
+ *
+ * Se comprueba al guardar (el validador de topologia aplica este DTO a flujos y
+ * plantillas) y no solo en ejecucion: un esquema con una palabra clave mal
+ * escrita fallaria con el flujo ya PAUSADO, o peor, con `strict: false`
+ * aceptaria cualquier objeto sin avisar.
+ */
+@ValidatorConstraint({ name: 'isCompilableJsonSchema', async: false })
+export class IsCompilableJsonSchemaConstraint implements ValidatorConstraintInterface {
+  public validate(value: unknown): boolean {
+    return 'validate' in compileJsonSchema(value);
+  }
+
+  public defaultMessage(args: ValidationArguments): string {
+    const compilation = compileJsonSchema(args.value);
+
+    return `jsonSchema no es un JSON Schema valido: ${'error' in compilation ? compilation.error : 'desconocido'}.`;
+  }
+}
 
 /**
  * Configuracion del nodo `ESCUDO_POST_IA`.
@@ -121,7 +158,7 @@ export class PostIaSanitizerConfigDto {
     enum: PostIaContentMode,
     default: DEFAULT_POST_IA_CONTENT_MODE,
     description:
-      'HTML audita un campo de markup; TEXT audita varios campos de texto plano (sin MAPEADOR_PLANTILLA delante).',
+      'HTML audita un campo de markup; TEXT audita varios campos de texto plano (sin MAPEADOR_PLANTILLA delante); JSON valida y sanea el objeto estructurado entero (con `jsonSchema` opcional).',
   })
   @IsOptional()
   @IsEnum(PostIaContentMode, {
@@ -202,6 +239,21 @@ export class PostIaSanitizerConfigDto {
       'Cada etiqueta debe ser un nombre HTML en minusculas (ej. "h1", "div").',
   })
   allowedTags?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'Solo en modo JSON: JSON Schema (draft-07, `ajv` estricto) que debe cumplir el objeto YA saneado. Omitido = basta con que el objeto traiga algun valor efectivo.',
+    type: Object,
+    example: {
+      type: 'object',
+      required: ['headline'],
+      properties: { headline: { type: 'string', minLength: 1 } },
+    },
+  })
+  @IsOptional()
+  @IsObject({ message: 'jsonSchema debe ser un objeto.' })
+  @Validate(IsCompilableJsonSchemaConstraint)
+  jsonSchema?: Record<string, unknown>;
 }
 
 /** Configuracion del escudo con los valores por defecto ya aplicados. */
@@ -214,6 +266,8 @@ export interface ResolvedPostIaSanitizerConfig {
   readonly requiredSelectors: readonly string[];
   /** Vacio significa "toda la lista blanca del saneador", nunca "ninguna". */
   readonly allowedTags: readonly string[];
+  /** Solo se lee en modo JSON. `null` = sin esquema. */
+  readonly jsonSchema: Record<string, unknown> | null;
 }
 
 /**
@@ -235,4 +289,5 @@ export const resolvePostIaSanitizerConfig = (
   sourceField: dto.sourceField ?? DEFAULT_POST_IA_SOURCE_FIELD,
   requiredSelectors: dto.requiredSelectors ?? [],
   allowedTags: dto.allowedTags ?? [],
+  jsonSchema: dto.jsonSchema ?? null,
 });

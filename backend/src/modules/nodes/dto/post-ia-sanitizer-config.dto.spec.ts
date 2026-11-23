@@ -250,6 +250,7 @@ describe('PostIaSanitizerConfigDto', () => {
         sourceFields: DEFAULT_POST_IA_SOURCE_FIELDS,
         requiredSelectors: [],
         allowedTags: [],
+        jsonSchema: null,
       });
     });
 
@@ -278,6 +279,65 @@ describe('PostIaSanitizerConfigDto', () => {
 
       // 3. Assert 🎯
       expect(config.sourceField).toBe('filled_markup');
+    });
+  });
+
+  describe('7. Modo JSON y jsonSchema', () => {
+    it('7.1 deberia admitir contentMode JSON con un esquema compilable', async () => {
+      // 1. Arrange 📐: el escudo que siembra la 069 en el maestro de cierre.
+      const params = {
+        contentMode: PostIaContentMode.JSON,
+        sourceNamespace: 'llm_response',
+        jsonSchema: {
+          type: 'object',
+          required: ['headline'],
+          properties: { headline: { type: 'string', minLength: 1 } },
+        },
+      };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+      const config = resolvePostIaSanitizerConfig(
+        plainToInstance(PostIaSanitizerConfigDto, params),
+      );
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+      expect(config.contentMode).toBe(PostIaContentMode.JSON);
+      expect(config.jsonSchema).toEqual(params.jsonSchema);
+    });
+
+    it.each([
+      [
+        'una palabra clave mal escrita (strict)',
+        { type: 'object', requried: ['x'] },
+      ],
+      ['un tipo inexistente', { type: 'objeto' }],
+      ['un arreglo en vez de objeto', ['headline']],
+      ['una cadena', '{"type":"object"}'],
+    ])('7.2 deberia rechazar AL GUARDAR %s', async (_label, jsonSchema) => {
+      // 1. Arrange 📐: sin esto, el esquema fallaria con el flujo ya PAUSADO.
+      const params = { contentMode: PostIaContentMode.JSON, jsonSchema };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors.map((error) => error.property)).toContain('jsonSchema');
+    });
+
+    it('7.3 deberia rechazar un esquema que supera el tope de tamano', async () => {
+      // 1. Arrange 📐
+      const jsonSchema = {
+        type: 'object',
+        description: 'x'.repeat(20_000),
+      };
+
+      // 2. Act ⚙️
+      const errors = await validateParams({ jsonSchema });
+
+      // 3. Assert 🎯
+      expect(errors.map((error) => error.property)).toEqual(['jsonSchema']);
     });
   });
 });
