@@ -7,7 +7,7 @@ import WarningModal from '@components/shared/WarningModal.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 /**
- * Pruebas "a mala leche" del aviso de 5 s (GUIA_PRUEBAS_MALA_LECHE.md §6).
+ * Pruebas "a mala leche" del aviso de 5 s (docs/GUIA_PRUEBAS_MALA_LECHE.md §6).
  *
  * El proyecto no tiene Cypress ni Playwright: el "e2e" de un dialogo es
  * montarlo de verdad, con Quasar real, reloj falso y clics sobre el DOM. Lo que

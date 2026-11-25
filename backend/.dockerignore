@@ -1,0 +1,11 @@
+# Nada de esto debe entrar en el contexto de build (PRODUCTION_DEPS_GUIDE.md §4).
+node_modules
+dist
+coverage
+logs
+*.log
+static/uploads
+# Los .env nunca entran en la imagen (security-and-scope.md §0.1): llegan en
+# runtime por `env_file` de docker-compose.yml.
+.env*
+.git

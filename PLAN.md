@@ -5394,3 +5394,55 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo: 0 escudos en JSON o con `jsonSchema`
 - [x] Regresion TEXT/HTML (unitaria bloque 12, e2e 8.3bis en TEXT y 14.4ter). Backend 3346 unitarias y 155/155 e2e; frontend 1806 y `vue-tsc` limpio
 - [ ] Negocio: el correo de cierre debe identificar el expediente
+
+## Documentacion en `docs/` y stack Docker portable (Linux / Windows)
+
+- **Documentacion:** `COMMANDS.md` -> `docs/commands.md` y `GUIA_PRUEBAS_MALA_LECHE.md` -> `docs/`. En la raiz quedan `README.md`, `claude.md`, `PLAN.md` y `Walkthrough.md` (los tres ultimos los exigen `system-prompt.md` e `index.md`). Cada `.md` de `docs/` abre con `## Índice` (anclas estilo GitHub). Nueva guia `docs/INSTALACION_Y_ENTORNO.md`: puertos, perimetro en Docker, proxy Apache2/Nginx, Linux y Windows.
+- **Compose:** sin perfil sigue levantando solo `postgres` (desarrollo diario intacto). El perfil `app` anade `redis` (7-alpine), `backend` y `frontend`. Red `protodo_net` con subred fija `172.28.0.0/16`, que el compose suma a `ALLOWED_IP_RANGES`. Backend y Redis solo en `127.0.0.1`; frontend en `127.0.0.1:8080` salvo `FRONTEND_BIND_ADDRESS`.
+- **Postgres:** `healthcheck` con `pg_isready`. Volumen nuevo = `01-init.sql` + `db/docker-init/02-bootstrap.sh` (baseline de `schema_migrations`, ADMIN de `BOOTSTRAP_ADMIN_EMAIL`, semilla 069). `db/migrations` montado en `/migrations:ro`.
+- **Imagenes:** `backend/Dockerfile` multi-stage `node:24.16.0-bookworm-slim` + `npx playwright install --with-deps chromium`, usuario `node`. `frontend/Dockerfile` compila con `VITE_API_BASE_URL=/api` y sirve con `nginx:stable-alpine`; `frontend/nginx.conf` enruta `/api/` (incluido `/api/socket.io` con upgrade) y `/static/uploads/`.
+- **Scripts:** `scripts/setup-linux.sh` / `scripts/setup-windows.bat` (Docker -> winget/Docker Desktop -> `.env` -> `up -d --build` -> migraciones) y `scripts/migrate-linux.sh` / `scripts/migrate-windows.bat` (`docker compose exec -T postgres psql`, control `schema_migrations`, `--baseline`, E2E si existe).
+- **`.gitattributes`:** LF para `.sh`, `.sql`, `Dockerfile*`, `.conf`, `.yml`, `.env*`; CRLF para `.bat`/`.cmd`.
+- [x] `docker compose config` (sin perfil y con `--profile app`), `bash -n` de los `.sh`, anclas de los indices validadas
+- [ ] Probar el stack completo (`scripts/setup-linux.sh`) con acceso al socket de Docker
+- [ ] Probar `setup-windows.bat` / `migrate-windows.bat` en un Windows 10/11 real
+
+## Configuracion centralizada en `backend/.env` y migraciones en Windows
+
+- **Contrato:** `backend/.env` es la unica fuente y `backend/.env.example` el contrato. `docker-compose.yml`, `db/docker-init/`, la plantilla de Nginx y `scripts/` no tienen valores por defecto. Obligatorias (`${VAR:?}` en compose y `REQUIRED_ENV_VARS` en `scripts/lib/env.{sh,bat}`): `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `POSTGRES_HOST_PORT`, `PORT`, `FRONTEND_PORT`, `FRONTEND_BIND_ADDRESS`, `REDIS_PORT`, `BOOTSTRAP_ADMIN_EMAIL` (+ `FRONTEND_URL` en los scripts). Opcionales: `ALLOWED_IP_RANGES`, `ACCEPTED_EMAIL_DOMAINS`, `E2E_DB_NAME`.
+- **Puertos:** postgres `POSTGRES_HOST_PORT:DB_PORT` con `PGPORT=DB_PORT` (interno); backend `127.0.0.1:PORT:PORT`; redis `127.0.0.1:REDIS_PORT:REDIS_PORT`; frontend `FRONTEND_BIND_ADDRESS:FRONTEND_PORT:80`. Desaparece `BACKEND_PORT` y las sobrescrituras de `PORT`/`DB_PORT`/`REDIS_PORT`/`FRONTEND_URL`.
+- **Nginx:** `frontend/nginx.conf.template` renderizada por el entrypoint oficial (`envsubst`, `NGINX_ENVSUBST_FILTER=^PORT$`) con upstream `backend:${PORT}`; `frontend/docker/10-require-env.sh` aborta si `PORT` falta o no es numerico.
+- **Builds:** `frontend/Dockerfile` con `npm ci --ignore-scripts` + `npx quasar prepare` tras `COPY . .`. `backend/Dockerfile` sin cambios de orden (no hay hooks que lean `src/`) y sin `EXPOSE` fijo.
+- **Windows:** `migrate-windows.bat` normaliza la lista de `schema_migrations` a CRLF antes de `findstr /x`; `setup-windows.bat` comprueba `wsl --status` antes de instalar/arrancar Docker Desktop y explica la instalacion manual del `.msi` de GitHub Releases.
+- **Scripts del anfitrion:** `apply-migrations.sh`, `bootstrap-db.sh` y `generate-doc-screenshots.js` sin `localhost`/`5433`/`5432`/correo por defecto.
+- [x] `docker compose --env-file backend/.env --profile app config --quiet`, prueba negativa sin `POSTGRES_HOST_PORT`, render de la plantilla con `envsubst`
+- [x] Auditoria `rg` de literales, terminadores LF/CRLF y formato `version` comun a las tres piezas
+- [ ] Probar el stack completo con acceso al socket de Docker
+- [ ] Probar `setup-windows.bat` / `migrate-windows.bat` en Windows 11 (debe mostrar "0 aplicadas, 69 ya estaban" sobre un volumen recien creado)
+
+## BD de pruebas E2E y runner de Jest en Docker
+
+- **`backend/Dockerfile`:** etapa `test` (`FROM deps`, `COPY . .`, `CMD npm test`) entre `build` y `runtime`; el runtime sigue siendo el destino por defecto.
+- **`docker-compose.yml`:** servicio efimero `backend-test` (perfil `test`, `target: test`, `env_file`, `NODE_ENV=test`, `DB_HOST=postgres`, `REDIS_HOST=redis`, `DB_NAME=${E2E_DB_NAME:-}`, subred en `ALLOWED_IP_RANGES`). Monta `backend/.env` en `/app/.env`, `db/migrations` en `/db/migrations` y `scripts/with-test-env.sh` en `/scripts/`, todo `:ro`. `redis` pasa a `profiles: ["app", "test"]`.
+- **`migrate-*`:** si `E2E_DB_NAME` tiene valor y no existe, `bootstrap_e2e_database` (`CREATE DATABASE :"db"`, `init.sql`, `02-bootstrap.sh` con `POSTGRES_DB`) y migracion; si falla, borra la base recien creada. Sin referencias a `npm run test:bootstrap`.
+- **Runners:** `scripts/test-linux.sh` / `scripts\test-windows.bat` `[unit|e2e|all]` (por defecto `all`; `integration` se rechaza con codigo 2): validan `.env` y `E2E_DB_NAME`, `up -d --wait postgres redis`, `migrate-*`, `build backend-test` y `run --rm`.
+- [x] `docker compose ... --profile app --profile test config --quiet`, `bash -n`, despacho de argumentos y guardas de `test-linux.sh`
+- [ ] `sudo scripts/test-linux.sh unit` (y `e2e`) con acceso al socket de Docker
+- [ ] `scripts\test-windows.bat` y creacion de `E2E_DB_NAME` en Windows 11
+
+## Propagacion de `BOOTSTRAP_ADMIN_EMAIL`, LF y Chromium en `backend-test`
+
+- **`migrate-*` / `bootstrap_e2e_database`:** `-e BOOTSTRAP_ADMIN_EMAIL` junto a `-e POSTGRES_DB` en el `exec` de `02-bootstrap.sh`; `init.sql`, `02-bootstrap.sh` y cada migracion pasan por `tr -d '\r'` (en Windows dentro del contenedor, con `PGUSER`/`PGDATABASE` por `-e`).
+- **`02-bootstrap.sh`:** guarda con mensaje accionable (recrear con `docker compose --env-file backend/.env --profile app up -d postgres`), sin correos; la semilla 069 se carga sin CR.
+- **`backend/Dockerfile` (`test`):** `npx playwright install --with-deps chromium` en `/ms-playwright` (`a+rX`); `db/migrations` y `scripts/with-test-env.sh` copiados via `additional_contexts` y normalizados con `sed 's/\r$//'`. Runtime intacto.
+- **`docker-compose.yml`:** `backend-test` con `additional_contexts` (`migrations`, `repo-scripts`); solo monta `backend/.env`.
+- [x] Guarda de `02-bootstrap.sh` con `BOOTSTRAP_ADMIN_EMAIL=""` (exit 1, comando de recreacion, sin `@`); simulacion CRLF -> `tr -d` en el anfitrion; `config --quiet` con perfiles `app` y `test`
+- [ ] `build backend-test` + `e2e` de `test-database-env`, `pipeline-seeds-integrity` y `telemetry` en Docker (pendiente de ejecucion con acceso al socket)
+
+## Test 1.1 del extractor PDF estable (CRLF y cache fria de Jest)
+
+- **Causa 1 (Windows):** `nota-nativa.pdf` no tiene bytes NUL; en un clon anterior a `*.pdf binary`, `core.autocrlf` lo paso a CRLF y desplazo los offsets de `xref`. El spec lee el fixture con `readNativePdfFixture()`, que restaura `\r\n` -> `\n` (exacto: el original no tiene ningun CR) y avisa con `console.warn`.
+- **Causa 2 (Docker / cache fria):** bajo Jest, `pdf-parse` rechazaba un `Buffer` de Node (`bad XRef entry`) en la primera ejecucion tras `--clearCache`; con un `Uint8Array` es estable. `document-extractor.util.ts` pasa ahora una vista `Uint8Array` (sin copia) via `parsePdf`.
+- **`.gitattributes`:** `eol=lf` tambien para `*.ts`, `*.js`, `*.mjs`, `*.cjs`, `*.vue`, `*.json`, `*.md`, `*.scss`, `*.css`; renormalizacion sin cambios en el indice.
+- [x] Spec en frio (`--clearCache` + `--no-cache`) 3/3 en verde (antes 0/3); suite unitaria completa en frio; `tsc` y ESLint
+- [ ] Confirmar en una imagen `backend-test` recien construida desde Windows

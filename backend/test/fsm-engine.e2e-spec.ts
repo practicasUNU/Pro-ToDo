@@ -7,7 +7,7 @@
 // la base de DESARROLLO, con el sondeo IMAP, la reanudacion por correo y el
 // cron del `.env` encendidos. Cada pasada dejaba un "[E2E] Pipeline dummy" mas
 // en la base real (habia catorce) y abria el buzon corporativo. Detectado al
-// preparar la purga de datos de prueba (GUIA_PRUEBAS_MALA_LECHE.md §8).
+// preparar la purga de datos de prueba (docs/GUIA_PRUEBAS_MALA_LECHE.md §8).
 // ---------------------------------------------------------------------------
 process.env.IMAP_POLLING_ENABLED = 'false';
 process.env.CRON_SCHEDULING_ENABLED = 'false';

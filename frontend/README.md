@@ -64,4 +64,4 @@ npm run build   # quasar build
 
 ## Configuración
 
-Ver [Configuring quasar.config.js](https://v2.quasar.dev/quasar-cli-vite/quasar-config-file) para ajustes del CLI de Quasar. La referencia operativa de comandos del monorepo está en [../COMMANDS.md](../COMMANDS.md).
+Ver [Configuring quasar.config.js](https://v2.quasar.dev/quasar-cli-vite/quasar-config-file) para ajustes del CLI de Quasar. La referencia operativa de comandos del monorepo está en [docs/commands.md](../docs/commands.md).

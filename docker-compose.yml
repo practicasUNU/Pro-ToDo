@@ -1,19 +1,208 @@
+# Infraestructura de Proto-Do.
+#
+# Sin perfil (`docker compose up -d`) solo arranca PostgreSQL: es lo que necesita
+# el desarrollo diario con `npm run start:dev` y `npm run dev` en el anfitrion.
+# El stack completo (Redis + backend + frontend en contenedores) va tras el
+# perfil `app`, que es el que usan `scripts/setup-linux.sh` y
+# `scripts\setup-windows.bat`:
+#
+#   docker compose --env-file backend/.env --profile app up -d --build
+#
+# El perfil `test` anade `backend-test`, un contenedor efimero con las
+# devDependencies para ejecutar Jest sin Node en el anfitrion
+# (`scripts/test-linux.sh`, `scripts\test-windows.bat`):
+#
+#   docker compose --env-file backend/.env --profile test run --rm backend-test npm test
+#
+# CONFIGURACION. Todo valor de entorno sale de `backend/.env` (contrato:
+# `backend/.env.example`). Aqui no hay valores por defecto: si falta una variable
+# obligatoria (`${VAR:?...}`), compose se niega a arrancar y dice cual. Compose
+# interpola el archivo entero, de modo que la comprobacion aplica tambien sin
+# perfil y a `docker compose exec`.
+#
+# Lo unico literal es topologia, no entorno: nombres de servicio (`postgres`,
+# `backend`, `redis`), la subred de `protodo_net`, el `listen 80` interno de
+# Nginx y los volumenes.
+#
+# La interpolacion `${...}` se resuelve con el `.env` junto a este archivo (en
+# Linux, symlink a `backend/.env`) o con `--env-file backend/.env`, que es lo que
+# pasan los scripts para no depender del symlink en Windows.
+# Guia completa: docs/INSTALACION_Y_ENTORNO.md
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: protodo_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER:?DB_USER definela en backend/.env (ver backend/.env.example)}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD definela en backend/.env (ver backend/.env.example)}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME definela en backend/.env (ver backend/.env.example)}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+      # Puerto INTERNO del contenedor. El servidor (y el temporal de initdb) lo
+      # toman de PGPORT, y `psql` / `pg_isready` dentro del contenedor tambien:
+      # por eso `docker compose exec postgres psql` no necesita `-p`.
+      PGPORT: ${DB_PORT:?DB_PORT definela en backend/.env (ver backend/.env.example)}
+      # Solo lo lee `02-bootstrap.sh`, y solo en el primer arranque del volumen.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?BOOTSTRAP_ADMIN_EMAIL definela en backend/.env (ver backend/.env.example)}
+    # Anfitrion:contenedor. Para el desarrollo en el anfitrion (`npm run
+    # start:dev`, MCP, `apply-migrations.sh`), que conecta a localhost:DB_PORT,
+    # POSTGRES_HOST_PORT debe valer lo mismo que DB_PORT.
     ports:
-      - "${DB_PORT:-5433}:5432"
+      - "${POSTGRES_HOST_PORT:?POSTGRES_HOST_PORT definela en backend/.env (ver backend/.env.example)}:${DB_PORT:?DB_PORT definela en backend/.env (ver backend/.env.example)}"
     volumes:
       - pgdata_protodo:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Orden alfabetico: primero el esquema final y despues el bootstrap
+      # (baseline de `schema_migrations`, ADMIN y semilla 069).
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./db/docker-init/02-bootstrap.sh:/docker-entrypoint-initdb.d/02-bootstrap.sh:ro
+      - ./db/migrations:/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - protodo_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: protodo_redis
+    restart: unless-stopped
+    # Tambien en `test`: `backend-test` depende de el.
+    profiles: ["app", "test"]
+    # Provisionado para las colas BullMQ (`architecture-patterns.md` §5); el
+    # backend aun no registra `BullModule`, de modo que hoy no lo consume.
+    command: ["redis-server", "--appendonly", "yes", "--port", "${REDIS_PORT:?REDIS_PORT definela en backend/.env (ver backend/.env.example)}"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:?REDIS_PORT definela en backend/.env (ver backend/.env.example)}:${REDIS_PORT:?REDIS_PORT definela en backend/.env (ver backend/.env.example)}"
+    volumes:
+      - redisdata_protodo:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "${REDIS_PORT:?REDIS_PORT definela en backend/.env (ver backend/.env.example)}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - protodo_net
+
+  backend:
+    build:
+      context: ./backend
+    image: protodo-backend:local
+    container_name: protodo_backend
+    restart: unless-stopped
+    profiles: ["app"]
+    env_file:
+      - ./backend/.env
+    # Todo lo demas (PORT, DB_PORT, DB_*, REDIS_PORT, FRONTEND_URL, secretos)
+    # llega tal cual desde `backend/.env`. Solo se sobrescribe lo que depende de
+    # la topologia de la red Docker o de la imagen:
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      LOG_DIR: /app/logs
+      # Tras el Nginx del frontend, el cliente llega con la IP de la pasarela de
+      # `protodo_net`: sin esta subred el perimetro (PROT-05) responderia 403.
+      # ALLOWED_IP_RANGES es opcional por contrato (localhost siempre entra).
+      ALLOWED_IP_RANGES: ${ALLOWED_IP_RANGES:-},172.28.0.0/16
+    # Solo en loopback: desde fuera se entra por el Nginx del frontend. El
+    # backend escucha en PORT (main.ts) y se publica en el mismo puerto.
+    ports:
+      - "127.0.0.1:${PORT:?PORT definela en backend/.env (ver backend/.env.example)}:${PORT:?PORT definela en backend/.env (ver backend/.env.example)}"
+    volumes:
+      - backend_logs:/app/logs
+      - backend_uploads:/app/static/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - protodo_net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Relativa: Nginx enruta `/api` y `/api/socket.io` al backend, y el
+        # cliente de sockets toma el origen del documento (socket.client.ts).
+        VITE_API_BASE_URL: /api
+        VITE_ACCEPTED_EMAIL_DOMAINS: ${ACCEPTED_EMAIL_DOMAINS:-}
+    image: protodo-frontend:local
+    container_name: protodo_frontend
+    restart: unless-stopped
+    profiles: ["app"]
+    # La imagen de Nginx renderiza `nginx.conf.template` con envsubst al
+    # arrancar: el upstream es `backend:${PORT}`. El filtro limita la
+    # sustitucion a PORT para no tocar `$host`, `$remote_addr`, etc.
+    environment:
+      PORT: ${PORT:?PORT definela en backend/.env (ver backend/.env.example)}
+      NGINX_ENVSUBST_FILTER: "^PORT$$"
+    # FRONTEND_BIND_ADDRESS=127.0.0.1 lo deja en loopback; 0.0.0.0 lo expone en
+    # la LAN (ver la guia, seccion del perimetro de red).
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:?FRONTEND_BIND_ADDRESS definela en backend/.env (ver backend/.env.example)}:${FRONTEND_PORT:?FRONTEND_PORT definela en backend/.env (ver backend/.env.example)}:80"
+    depends_on:
+      - backend
+    networks:
+      - protodo_net
+
+  backend-test:
+    build:
+      context: ./backend
+      # Etapa con devDependencies y Chromium (backend/Dockerfile); el runtime
+      # no las tiene.
+      target: test
+      # Lo que las suites leen fuera de `backend/`. Se COPIA en la imagen (y no
+      # se monta) para quitarle el CR de un checkout de Windows; tras cambiar
+      # una migracion hay que reconstruir (`scripts/test-*` ya lo hacen).
+      additional_contexts:
+        migrations: ./db/migrations
+        repo-scripts: ./scripts
+    image: protodo-backend-test:local
+    # Efimero (`run --rm`): sin container_name ni puertos publicados.
+    profiles: ["test"]
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: test
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      # GUARDA de la base de pruebas. `env_file` trae el DB_NAME de DESARROLLO;
+      # las suites e2e montan el AppModule real y borran filas. Aqui se fija la
+      # E2E, y `test/helpers/e2e-database.guard.ts` (con el `.env` montado abajo)
+      # aborta si esta vacia o coincide con DB_NAME. Las unitarias no la usan.
+      DB_NAME: ${E2E_DB_NAME:-}
+      ALLOWED_IP_RANGES: ${ALLOWED_IP_RANGES:-},172.28.0.0/16
+    volumes:
+      # El guard compara con el DB_NAME de `backend/.env` (lo lee de /app/.env):
+      # sin el archivo, el DB_NAME heredado contaria como override explicito.
+      - ./backend/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - protodo_net
+
+networks:
+  protodo_net:
+    name: protodo_net
+    ipam:
+      config:
+        # Subred fija para poder nombrarla en ALLOWED_IP_RANGES.
+        - subnet: 172.28.0.0/16
 
 volumes:
   pgdata_protodo:
     name: pgdata_protodo
+  redisdata_protodo:
+    name: redisdata_protodo
+  backend_logs:
+    name: protodo_backend_logs
+  backend_uploads:
+    name: protodo_backend_uploads

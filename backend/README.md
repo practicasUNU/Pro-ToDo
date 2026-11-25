@@ -45,7 +45,7 @@ npm run db:bootstrap   # crea DB_NAME si no existe: init.sql + baseline + ADMIN 
 npm run db:migrate     # aplica solo las migraciones pendientes (tabla schema_migrations)
 ```
 
-`db:bootstrap` y `test:bootstrap` cargan solos las semillas de contenido (plantillas HTML, prompts y los cinco blueprints maestros: migración `069`), sin bucles manuales posteriores. Ver [COMMANDS.md §3](../COMMANDS.md#3-migraciones-de-base-de-datos).
+`db:bootstrap` y `test:bootstrap` cargan solos las semillas de contenido (plantillas HTML, prompts y los cinco blueprints maestros: migración `069`), sin bucles manuales posteriores. Ver [docs/commands.md §3](../docs/commands.md#3-migraciones-de-base-de-datos).
 
 ## Testing
 
@@ -86,7 +86,7 @@ npm run lint                                # ESLint + Prettier con autofix
 npm run format                              # Prettier sobre src/ y test/
 ```
 
-> ⚠️ `npm run typecheck` **no sustituye** a `npm run build`: `nest build` puede rechazar código que `tsc` acepta (ver [COMMANDS.md](../COMMANDS.md#verificación-del-backend-antes-de-cerrar-un-cambio)).
+> ⚠️ `npm run typecheck` **no sustituye** a `npm run build`: `nest build` puede rechazar código que `tsc` acepta (ver [docs/commands.md](../docs/commands.md#verificación-del-backend-antes-de-cerrar-un-cambio)).
 
 ## Dependencias
 

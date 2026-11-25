@@ -9571,3 +9571,51 @@ mapeador.
 - **Que no cambia:** el asterisco de `{{*parsed_email.clean_body}}` sigue siendo la marca obligatoria. El caso real sin expediente se sigue parando en el escudo, ahora con `ERR_POST_IA_EMPTY_HTML` sobre `llm_response.headline` / `summary` (unitaria 12.2 y e2e 8.3bis).
 - **Estado observado en desarrollo:** `Cierre Licitacion Remoto` ya estaba editado a mano en TEXT con `sourceFields: ["headline"]`. Como no estaba en JSON, la normalizacion no lo toca.
 - [ ] Pendiente de negocio: que los correos de cierre incluyan el codigo de expediente
+
+## Documentacion en `docs/` y stack Docker portable
+
+- **Por que no se movieron `claude.md`, `PLAN.md` ni `Walkthrough.md`:** `system-prompt.md` exige los dos ultimos en la raiz y `claude.md` es el indice canonico de reglas que carga el asistente. Solo se movieron los documentos operativos.
+- **Por que Node 24.16.0 y no 20 en las imagenes:** `.nvmrc`, ambos `engines` y `dependency-security.md` §3 fijan la 24.16.0; una imagen con 20 daria `EBADENGINE` y probaria un runtime distinto del que se despliega.
+- **Por que los scripts NO ejecutan las 69 migraciones en cada arranque:** `init.sql` es el acumulado final. Encadenar la historia sobre el falla (002/005/009 no aplican; 035-038 rotas) y con `ON_ERROR_STOP=1` el primer arranque se pararia. Se reutiliza el contrato de `apply-migrations.sh` (`schema_migrations`) y el volumen nuevo nace en baseline, igual que `db:bootstrap`.
+- **Por que el bootstrap va en `docker-entrypoint-initdb.d`:** Docker solo lo ejecuta con el volumen vacio, que es exactamente "base recien creada desde `init.sql`". Detectarlo desde fuera exigiria heuristicas (tablas vacias, ausencia de `schema_migrations`) que confundirian una base vieja sin adoptar con una nueva.
+- **Por que un perfil `app`:** sin perfil, `docker compose up -d` habria pasado a compilar backend y frontend y a ocupar el 3000, rompiendo el desarrollo con `npm run start:dev`.
+- **Por que `X-Forwarded-For $remote_addr` (sobrescribe) en Nginx:** el backend toma la primera IP de esa cabecera para el perimetro; encadenarla (`$proxy_add_x_forwarded_for`) dejaria que un cliente inyectara una IP autorizada delante.
+- **Por que la subred fija:** tras Nginx el backend ve la pasarela de `protodo_net`. Con subred fija se puede nombrar en `ALLOWED_IP_RANGES`; en Docker Desktop (Windows) esto implica que el perimetro no distingue clientes de la LAN, por eso el panel se publica por defecto solo en `127.0.0.1`.
+- **Por que los `.bat` sin expansion retardada ni `for /f` sobre SQL:** `!` en un secreto del `.env` se corromperia, y las comillas/parentesis del SQL dentro de `for /f` son fragiles. Las consultas se vuelcan a un temporal y se leen con `set /p`; la lista de aplicadas se consulta una vez y se busca con `findstr /x /l`.
+- [ ] Prueba real del perfil `app` y de los `.bat` (ver PLAN)
+
+## Configuracion centralizada en `backend/.env` y migraciones en Windows
+
+- **Por que `migrate-windows.bat` intentaba aplicar desde la 001:** `psql` dentro del contenedor escribe la lista de `schema_migrations` con finales LF, y `findstr /x` (igual que `$`) solo reconoce el final de linea con CRLF. Ninguna version coincidia, todas parecian pendientes y la `005` fallaba sobre el esquema de `init.sql`. El formato del dato era correcto (basename en las tres piezas); el fallo estaba en la comparacion. Ahora la lista se reescribe con `for /f` + `echo` (CRLF) antes de comparar, y la primera linea de cada consulta se lee con `for /f` en vez de `set /p`.
+- **Por que `DB_PORT` es el puerto interno y existe `POSTGRES_HOST_PORT`:** separa lo que ve el contenedor de lo que se publica, como pide el contrato. `PGPORT` hace que servidor, initdb, `psql` y `pg_isready` del contenedor usen `DB_PORT` sin `-p`. Como el desarrollo en el anfitrion conecta a `localhost:DB_PORT`, la plantilla trae los dos iguales (`5433`) y la guia lo exige para ese modo.
+- **Por que se elimina la sobrescritura de `FRONTEND_URL`:** solo gobierna CORS; tras Nginx el panel es mismo origen, asi que el valor del `.env` no interviene y no hace falta inventar uno en el compose.
+- **Por que `${VAR:?}` y no defaults:** un default en Git es un valor de entorno disfrazado (`practicas@unuware.com`, `5433`...). Fallar diciendo que variable falta es mejor que arrancar con un dato que nadie eligio. Compose interpola el archivo entero, de modo que la guarda cubre tambien `up -d` sin perfil y `exec`.
+- **Por que una plantilla de Nginx:** el upstream depende de `PORT`; la imagen oficial ya trae `envsubst` en su entrypoint y el filtro evita tocar `$host`/`$remote_addr`. El guard en `/docker-entrypoint.d/` convierte un `PORT` ausente en un error claro en vez de un `proxy_pass` roto.
+- **Por que `npm ci --ignore-scripts` en el frontend:** el `postinstall` (`quasar prepare`) necesita `src/` e `index.html`; se ejecuta a mano tras `COPY . .`. Los otros install scripts del lock (`@parcel/watcher`, `fsevents`) no intervienen en el build.
+- **Por que WSL desde GitHub Releases:** `wsl --install`/`--update` descargan el `.msi` a la carpeta del usuario; con tildes o espacios en la ruta fallan con "Error catastrofico" o abren la ayuda de `msiexec`. Instalar el `.msi` desde `C:\wsl.msi` evita la ruta problematica.
+- [ ] Prueba real en Windows 11 y del perfil `app` en Linux (ver PLAN)
+
+## BD de pruebas E2E y runner de Jest en Docker
+
+- **Por que la base E2E se crea con `init.sql` + `02-bootstrap.sh` y no aplicando las migraciones:** sobre una base vacia la historia no se encadena (la 005 actualiza `tipos_nodo`, sustituida por `nodos`; la 009 no lleva `IF NOT EXISTS`; la 002 promueve un usuario inexistente; 035-038 rotas). Es el mismo camino que `test:bootstrap` y que un volumen nuevo, y `02-bootstrap.sh` se reutiliza tal cual cambiando `POSTGRES_DB` con `exec -e`.
+- **Por que se borra la base si el bootstrap falla:** una base creada sin `schema_migrations` haria que la siguiente ejecucion la saltara para siempre. Solo se borra la que acaba de crear esa misma ejecucion.
+- **Por que `backend-test` monta `backend/.env` y sobrescribe `DB_NAME`:** el `.env` no entra en la imagen. Sin el archivo, `resolveTestDatabase` veria el `DB_NAME` de desarrollo (llegado por `env_file`) como override explicito y las e2e —que montan el `AppModule` real y borran filas— correrian contra desarrollo. Con `DB_NAME=${E2E_DB_NAME:-}` y el archivo montado, una `E2E_DB_NAME` vacia o igual a `DB_NAME` aborta antes de conectar.
+- **Por que se montan `db/migrations` y `scripts/with-test-env.sh` en `/`:** `prompt-migrations.helper.ts` y `test-database-env.e2e-spec.ts` resuelven rutas de la raiz del repo desde `backend/test/`; con `WORKDIR /app` esa raiz es `/`, y esos archivos no estan en el contexto de build `./backend`.
+- **Por que `integration` se rechaza:** solo existen dos configuraciones de Jest (`npm test` con `rootDir: src` y `test/jest-e2e.json`). Un alias haria creer que hay una tercera suite.
+- **Por que el runner reconstruye `backend-test` antes de `run`:** el codigo va copiado en la imagen; sin `build`, `run` ejecutaria una version anterior del codigo.
+- [ ] Prueba real en Docker (ver PLAN)
+
+## Propagacion de `BOOTSTRAP_ADMIN_EMAIL`, LF y Chromium en `backend-test`
+
+- **Por que `-e BOOTSTRAP_ADMIN_EMAIL` en el `exec`:** `docker compose exec` no relee `backend/.env`; hereda el entorno con el que se CREO el contenedor. Una variable anadida despues llegaba vacia a `02-bootstrap.sh`. Pasarla explicita la hace independiente de cuando se creo el contenedor; la guarda del script, ademas, explica como recrearlo.
+- **Por que quitar el CR al consumir y no solo con `.gitattributes`:** las reglas ya existian, pero un checkout anterior a ellas conserva CRLF hasta renormalizar, y Git no lo hace solo. Un `\r` en un `.sql` acaba dentro de las columnas TEXT (`texto_prompt`) y rompe las comparaciones exactas; en un `.sh`, bash ni arranca. Se limpia en el punto de consumo (`tr -d '\r'` dentro del contenedor, donde siempre hay `tr`), sin tocar el arbol de trabajo.
+- **Por que `additional_contexts` en vez de montajes:** un montaje `:ro` no se puede normalizar. Copiar `db/migrations` y `with-test-env.sh` en la imagen permite pasarles `sed` y las rutas finales (`/db/migrations`, `/scripts/`) no cambian para los specs.
+- **Por que Chromium en la etapa `test` y no en `deps`:** `deps` alimenta tambien `build`; meter alli Chromium y sus librerias engordaria esa etapa sin necesidad. En `test`, antes del `COPY . .`, la capa se reutiliza de la cache entre cambios de codigo.
+- **Por que los `.bat` quedan `i/lf w/crlf` y no `i/crlf`:** con `text eol=crlf` Git normaliza a LF en el indice y convierte al hacer checkout; `i/crlf` exigiria desactivar la normalizacion (`-text`).
+
+## Test 1.1 del extractor PDF estable (CRLF y cache fria de Jest)
+
+- **Por que el encargo hablaba de un template literal:** el test no construye el PDF; lee el fixture versionado. El sintoma (offsets de `xref` rotos) era real, pero venia del fixture convertido a CRLF por `autocrlf`, no del `.ts`.
+- **Por que restaurar y avisar en vez de solo fallar:** el fixture original no tiene ningun `\r`, asi que `\r\n` -> `\n` lo devuelve byte a byte (lo comprueba el `1.1.1`); el `console.warn` evita que la corrupcion del checkout pase desapercibida.
+- **Por que tocar codigo de produccion:** al investigar aparecio una segunda causa independiente: con LF y en Linux, el `1.1` fallaba siempre en la primera ejecucion con la cache de Jest fria. Aislado: `pdf-parse` (fake worker de pdf.js, que clona con `new value.constructor(...)`) devuelve `bad XRef entry` con un `Buffer` bajo Jest y funciona con un `Uint8Array`. Una imagen `backend-test` nueva siempre arranca en frio, asi que ningun cambio solo en el test lo arreglaba. La vista `Uint8Array` no copia memoria y no cambia el comportamiento fuera de Jest.
+- **Por que una anotacion y no un `as unknown as`:** `@types/pdf-parse` declara solo `Buffer`; el proyecto no activa `strictFunctionTypes`, de modo que la firma real se declara anotando la constante y ESLint (`no-unnecessary-type-assertion`) queda limpio.

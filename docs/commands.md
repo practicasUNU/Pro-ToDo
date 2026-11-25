@@ -1,10 +1,53 @@
-# COMMANDS.md — Referencia Operativa de Comandos (Proto-Do)
+# docs/commands.md — Referencia Operativa de Comandos (Proto-Do)
 
 Manual operativo unificado del monorepo: carga de entorno, infraestructura Docker, migraciones SQL, backend NestJS, frontend Quasar, scripts de mantenimiento del sandbox y flujo de Git.
 
 Documento vivo — actualizar ante cualquier script nuevo en `backend/package.json`, `frontend/package.json` o `.claude/commands/`.
 
 > **No existe `package.json` en la raíz del repositorio.** No hay orquestador de workspaces: cada paquete se gestiona desde su propio directorio (`backend/`, `frontend/`). Todo comando `npm` de este documento indica desde dónde se ejecuta.
+
+## Índice
+
+- [1. Carga de Variables de Entorno](#1-carga-de-variables-de-entorno)
+  - [1.1 Exportar backend/.env a la sesión actual](#11-exportar-backendenv-a-la-sesión-actual)
+  - [1.2 Override transitorio para una sola ejecución](#12-override-transitorio-para-una-sola-ejecución)
+- [2. Infraestructura y Base de Datos (Docker · PostgreSQL 16)](#2-infraestructura-y-base-de-datos-docker--postgresql-16)
+  - [2.1 Requisitos previos](#21-requisitos-previos)
+  - [2.2 Ciclo de vida del contenedor](#22-ciclo-de-vida-del-contenedor)
+  - [2.3 Acceso interactivo a psql](#23-acceso-interactivo-a-psql)
+  - [2.4 Automatización vía slash command](#24-automatización-vía-slash-command)
+  - [2.5 Stack completo en Docker (perfil app)](#25-stack-completo-en-docker-perfil-app)
+  - [2.6 Equivalencias: Node nativo frente a contenedor](#26-equivalencias-node-nativo-frente-a-contenedor)
+- [3. Migraciones de Base de Datos](#3-migraciones-de-base-de-datos)
+  - [3.1 Aplicar una migración](#31-aplicar-una-migración)
+  - [Verificación del backend antes de cerrar un cambio](#verificación-del-backend-antes-de-cerrar-un-cambio)
+  - [3.1.1 Aplicarlas con control de estado (recomendado)](#311-aplicarlas-con-control-de-estado-recomendado)
+  - [3.1.2 Crear una base desde cero](#312-crear-una-base-desde-cero)
+  - [3.2 Crear una migración nueva](#32-crear-una-migración-nueva)
+- [4. Backend (NestJS 🦁) — backend/](#4-backend-nestjs---backend)
+  - [4.1 Ejecución](#41-ejecución)
+  - [4.2 Calidad y tipos](#42-calidad-y-tipos)
+  - [4.3 Pruebas (Jest, patrón AAA)](#43-pruebas-jest-patrón-aaa)
+    - [4.3.1 Base de las pruebas E2E (E2E_DB_NAME)](#431-base-de-las-pruebas-e2e-e2e_db_name)
+- [5. Frontend (Vue 3 + Quasar ⚡) — frontend/](#5-frontend-vue-3--quasar---frontend)
+  - [5.1 Ejecución y build](#51-ejecución-y-build)
+  - [5.2 Calidad y tipos](#52-calidad-y-tipos)
+  - [5.3 Pruebas (Vitest)](#53-pruebas-vitest)
+  - [5.4 Variables de entorno](#54-variables-de-entorno)
+- [6. Scripts Manuales y Mantenimiento del Sandbox](#6-scripts-manuales-y-mantenimiento-del-sandbox)
+  - [6.1 drupal:cleanup — limpieza de la página de títulos](#61-drupalcleanup--limpieza-de-la-página-de-títulos)
+    - [Reset total (--all / --force-all)](#reset-total---all----force-all)
+  - [6.2 drupal:clean — purga quirúrgica](#62-drupalclean--purga-quirúrgica)
+  - [6.3 drupal:inject — inyección de marcado](#63-drupalinject--inyección-de-marcado)
+  - [6.4 Regla de oro de los selectores](#64-regla-de-oro-de-los-selectores)
+- [7. Control de Versiones (Git Flow)](#7-control-de-versiones-git-flow)
+  - [7.1 Metodología](#71-metodología)
+  - [7.2 Conventional Commits y coincidencia de scope](#72-conventional-commits-y-coincidencia-de-scope)
+  - [7.3 Los hooks no se distribuyen](#73-los-hooks-no-se-distribuyen)
+  - [7.4 Trabajo diario](#74-trabajo-diario)
+  - [7.5 Empujar todas las ramas locales excluyendo feat/trigger-imap-tests](#75-empujar-todas-las-ramas-locales-excluyendo-feattrigger-imap-tests)
+- [8. Comandos del Asistente (.claude/commands/)](#8-comandos-del-asistente-claudecommands)
+- [9. Resumen Rápido (Quickstart)](#9-resumen-rápido-quickstart)
 
 ---
 
@@ -49,11 +92,16 @@ Es la vía preferida frente a editar `backend/.env` cuando el cambio es puntual:
 
 PostgreSQL corre exclusivamente dentro del contenedor `protodo_postgres` (`docker-compose.yml`, raíz). Prohibido depender de una instalación nativa o de un socket Unix del anfitrión (`security-and-scope.md` §0).
 
+`docker compose up -d` sin perfil levanta **solo PostgreSQL**, que es lo que necesita el desarrollo
+diario con `npm run start:dev`. El stack completo (Redis, backend y frontend en contenedores) va tras
+el perfil `app` y tiene su propia sección (§2.5); la guía de instalación para Linux y Windows está en
+[`docs/INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md).
+
 ### 2.1 Requisitos previos
 
 - Symlink `.env` → `backend/.env` en la raíz (ver §1.1).
-- Variables en `backend/.env`: `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `DB_NAME`.
-- El puerto se publica como `${DB_PORT:-5433}:5432`: por defecto **5433** en el anfitrión, 5432 dentro del contenedor.
+- Variables en `backend/.env` (obligatorias, sin valores por defecto en `docker-compose.yml`): `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `DB_NAME`, `POSTGRES_HOST_PORT`, `BOOTSTRAP_ADMIN_EMAIL` y el resto de la lista de [`INSTALACION_Y_ENTORNO.md` §1.2](INSTALACION_Y_ENTORNO.md#12-configuración-centralizada-en-backendenv). Compose interpola el archivo entero, así que también las necesita `docker compose up -d` sin perfil.
+- El puerto se publica como `${POSTGRES_HOST_PORT}:${DB_PORT}`: `DB_PORT` es el puerto **interno** del contenedor (`PGPORT`) y `POSTGRES_HOST_PORT` el del anfitrión. Para el desarrollo en el anfitrión deben coincidir (la plantilla trae **5433** en ambos).
 
 > 🔐 **Sobre `sudo`:** en este entorno el socket de Docker no es accesible para el usuario (`permission denied ... /var/run/docker.sock`), de modo que los comandos van con `sudo`, igual que en las cabeceras de `db/migrations/*.sql`. Si tu usuario pertenece al grupo `docker`, omítelo.
 
@@ -67,7 +115,14 @@ PostgreSQL corre exclusivamente dentro del contenedor `protodo_postgres` (`docke
 | Logs en vivo | `sudo docker compose logs -f postgres` |
 | Reiniciar sin pérdida de datos | `sudo docker compose restart postgres` |
 
-En el primer arranque sobre un volumen vacío, Postgres ejecuta `init.sql` desde `docker-entrypoint-initdb.d`.
+En el primer arranque sobre un volumen vacío, Postgres ejecuta desde `docker-entrypoint-initdb.d`:
+
+1. `01-init.sql` (montaje de `init.sql`): el esquema final.
+2. `02-bootstrap.sh` (montaje de `db/docker-init/02-bootstrap.sh`): crea `schema_migrations` y
+   registra todas las migraciones en modo baseline, siembra el ADMIN de `BOOTSTRAP_ADMIN_EMAIL` (si
+   está definido) y aplica la semilla `069`. Es el mismo resultado que `npm run db:bootstrap` (§3.1.2).
+
+Sobre un volumen que ya existe, ninguno de los dos vuelve a ejecutarse.
 
 > ⚠️ **Comando destructivo — pérdida total de datos:**
 > ```bash
@@ -87,6 +142,53 @@ Las llaves con `:?` abortan con el mensaje indicado si la variable no está expo
 ### 2.4 Automatización vía slash command
 
 `/docker-db <accion>` (`.claude/commands/docker-db.md`) mapea `up | down | restart | status | reset` a los comandos anteriores, exigiendo confirmación expresa antes de `reset`.
+
+### 2.5 Stack completo en Docker (perfil `app`)
+
+| Acción | Linux | Windows (CMD / PowerShell / doble clic) |
+|---|---|---|
+| Instalar, arrancar y migrar | `scripts/setup-linux.sh` | `scripts\setup-windows.bat` |
+| Solo migraciones pendientes | `scripts/migrate-linux.sh` | `scripts\migrate-windows.bat` |
+| Adoptar una base ya migrada | `scripts/migrate-linux.sh --baseline` | `scripts\migrate-windows.bat --baseline` |
+| Pruebas Jest en Docker (`unit`, `e2e` o `all`) | `scripts/test-linux.sh [unit\|e2e\|all]` | `scripts\test-windows.bat [unit\|e2e\|all]` |
+| Arrancar a mano | `docker compose --env-file backend/.env --profile app up -d --build` | ídem con `backend\.env` |
+| Detener (conserva volúmenes) | `docker compose --env-file backend/.env --profile app down` | ídem |
+
+- Panel en `http://localhost:8080`; Nginx enruta `/api` y `/api/socket.io` al contenedor `backend`.
+- Los scripts de migración usan `docker compose exec -T postgres psql`: no requieren `psql` en el
+  anfitrión y llevan la cuenta en `schema_migrations`, igual que `scripts/apply-migrations.sh`
+  (§3.1.1), que sigue disponible para quien use el `psql` del anfitrión.
+- Si `E2E_DB_NAME` tiene valor, `setup-*` y `migrate-*` **crean** esa base dentro del contenedor
+  cuando falta (`init.sql` + `db/docker-init/02-bootstrap.sh`, como un volumen nuevo) y la migran
+  junto a `DB_NAME`. Sin Node no hace falta `npm run test:bootstrap`.
+- `test-*` levanta `postgres` y `redis`, migra las dos bases, reconstruye el servicio efímero
+  `backend-test` (perfil `test`, etapa `test` de `backend/Dockerfile`, con devDependencies) y lanza
+  Jest con `docker compose run --rm`. `npm run test:*` queda para equipos con Node.js (§4.3).
+- Puertos, variables que sobrescribe el `docker-compose.yml` y resolución de problemas:
+  [`docs/INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md).
+
+### 2.6 Equivalencias: Node nativo frente a contenedor
+
+Para equipos sin Node.js en el anfitrión. `$C` abrevia `docker compose --env-file backend/.env`
+(en Windows, `backend\.env`). El porqué de cada fila, la diferencia entre las etapas `runtime` y
+`test` y la colisión de puertos están en
+[`INSTALACION_Y_ENTORNO.md` §1.5](INSTALACION_Y_ENTORNO.md#15-modos-de-operación-100--docker-vs-desarrollo-híbrido-con-node-local).
+
+| Nativo (desde `backend/`) | En contenedor | Perfil |
+|---|---|---|
+| `npm run start:dev` | `$C --profile app up -d --build` (sin recarga en caliente: reconstruir tras cada cambio) | `app` |
+| `npm run build` | `$C --profile test run --rm backend-test npm run build` | `test` |
+| `npx tsc --noEmit -p tsconfig.build.json` | `$C --profile test run --rm backend-test npx tsc --noEmit -p tsconfig.build.json` | `test` |
+| `npm test` | `scripts/test-linux.sh unit` / `scripts\test-windows.bat unit` | `test` |
+| `npm run test:e2e` | `scripts/test-linux.sh e2e` / `scripts\test-windows.bat e2e` | `test` |
+| `npm run db:migrate` | `scripts/migrate-linux.sh` / `scripts\migrate-windows.bat` | — |
+| `npm run test:bootstrap` | `scripts/migrate-*` (crea `E2E_DB_NAME` si falta) | — |
+
+- El contenedor `backend` (etapa `runtime`, `npm ci --omit=dev`) no tiene TypeScript, Nest CLI ni
+  Jest: los comandos de compilación y pruebas van siempre contra `backend-test`, que se reconstruye
+  con `$C --profile test build backend-test` (los `test-*` lo hacen solos).
+- Con el perfil `app` levantado no se lanza `npm run start:dev` ni `quasar dev`: `PORT` y
+  `FRONTEND_PORT` ya están ocupados.
 
 ---
 
@@ -174,9 +276,10 @@ npm run db:bootstrap --prefix backend                 # usa DB_NAME
 npm run test:bootstrap --prefix backend               # usa E2E_DB_NAME (ver §4.3.1)
 ```
 
-Si el volumen nació vacío, el primer `docker compose up -d` ya creó `DB_NAME` desde `init.sql`
-(sin ADMIN ni `schema_migrations`) y `db:bootstrap` abortará con «ya existe»: como esa base está
-vacía, se borra con el `DROP DATABASE` que imprime el propio script y se relanza.
+Si el volumen nació vacío, el primer `docker compose up -d` ya dejó `DB_NAME` bootstrapeada
+(`init.sql` + `db/docker-init/02-bootstrap.sh`, ver §2.2): `db:bootstrap` abortará con «ya existe» y
+**no hace falta**. Sigue siendo el camino para crear la base de E2E (`test:bootstrap`) o cualquier
+otra base adicional sobre un volumen existente.
 
 Ejecuta `init.sql`, registra las migraciones en modo baseline, siembra un ADMIN activo
 (`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`) y carga las semillas de contenido (ver abajo). Aborta si la base ya existe: recrearla
@@ -250,6 +353,11 @@ Todos los comandos se ejecutan desde `backend/`.
 | `npm run test:debug` | `--inspect-brk --runInBand` para depuración paso a paso. |
 | `npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte) contra la base de `E2E_DB_NAME`. Aborta antes de conectar si falta o coincide con `DB_NAME` (ver §4.3.1). |
 
+> **Sin Node.js en el anfitrión** (Windows, evaluadores con solo Docker): `scripts/test-linux.sh` o
+> `scripts\test-windows.bat` con `unit`, `e2e` o `all` (por defecto) ejecutan estas mismas suites dentro
+> del contenedor `backend-test` (§2.5). No hay suite `integration`: las pruebas con base de datos real
+> son las `e2e`.
+
 #### 4.3.1 Base de las pruebas E2E (`E2E_DB_NAME`)
 
 Se declara una vez en `backend/.env`: `E2E_DB_NAME='<nombre_bd_test>'`, distinto de `DB_NAME`.
@@ -265,7 +373,9 @@ y se replica en `scripts/with-test-env.sh` (envoltorio de los dos scripts de bas
 | `E2E_DB_NAME` vacío o igual a `DB_NAME` | **aborta** (exit 1) sin conectar |
 
 `test:bootstrap` deja la base sembrada (§3.1.2), incluida la `069` que valida
-`pipeline-seeds-integrity.e2e-spec.ts`.
+`pipeline-seeds-integrity.e2e-spec.ts`. Sin Node ni `psql` en el anfitrión, `migrate-linux.sh` /
+`migrate-windows.bat` (y los `setup-*`) hacen lo mismo dentro del contenedor cuando la base no
+existe (§2.5).
 
 > `jest.rootDir` es `src`, así que **un `.spec.ts` colocado en `backend/test/` no lo ejecuta `npm test`**. Los specs unitarios viven junto al fuente; `backend/test/` alberga factories, fixtures y los `*.e2e-spec.ts`.
 
@@ -572,6 +682,7 @@ Slash commands invocables en Claude Code. Cada uno exige validaciones antes de t
 set -a && source backend/.env && set +a
 
 # 1. Infraestructura y dependencias (npm ci, nunca npm install en limpio)
+#    (stack completo en contenedores: scripts/setup-linux.sh, ver §2.5)
 sudo docker compose up -d
 (cd backend && npm ci) && (cd frontend && npm ci)
 

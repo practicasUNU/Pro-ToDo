@@ -49,6 +49,48 @@ const NATIVE_PDF_PATH = join(
   '../../../../test/fixtures/nota-nativa.pdf',
 );
 
+/** Aviso que se emite si el fixture llega convertido a CRLF. */
+const CRLF_FIXTURE_WARNING =
+  '[document-extractor.spec] nota-nativa.pdf llega con CRLF (checkout anterior a ' +
+  '.gitattributes): se restaura a LF para la prueba. Renormaliza el checkout con ' +
+  '`git rm --cached -r . && git reset --hard` (descarta cambios locales).';
+
+/**
+ * Deshace la conversion LF -> CRLF que `core.autocrlf=true` aplica en Windows.
+ *
+ * POR QUE. `nota-nativa.pdf` no contiene ningun byte NUL, asi que Git lo trata
+ * como texto si `.gitattributes` no lo declara `binary` (un clon anterior a
+ * esa regla). Sus 84 saltos de linea pasan a CRLF, los offsets de la tabla
+ * `xref` / `startxref` quedan desplazados y pdf.js lo rechaza
+ * (`bad XRef entry`): la prueba fallaba por el checkout, no por el extractor.
+ *
+ * Es EXACTO solo porque el fixture original no contiene ningun `\r`: cambiar
+ * `\r\n` por `\n` devuelve el fichero byte a byte. Si se regenera con un
+ * `\r` legitimo, este helper deja de ser valido. `latin1` conserva cada byte en
+ * el viaje Buffer -> string -> Buffer.
+ */
+const restoreLfLineEndings = (buffer: Buffer): Buffer =>
+  Buffer.from(buffer.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+
+/** Convierte LF a CRLF: reproduce el fixture tal como llega a un checkout de Windows. */
+const toCrlfLineEndings = (buffer: Buffer): Buffer =>
+  Buffer.from(buffer.toString('latin1').replace(/\n/g, '\r\n'), 'latin1');
+
+/**
+ * Lee el PDF nativo restaurandolo a LF si hace falta. No oculta la corrupcion:
+ * avisa por consola para que el checkout se renormalice.
+ */
+const readNativePdfFixture = (): Buffer => {
+  const buffer = readFileSync(NATIVE_PDF_PATH);
+
+  if (!buffer.includes('\r\n')) {
+    return buffer;
+  }
+
+  console.warn(CRLF_FIXTURE_WARNING);
+  return restoreLfLineEndings(buffer);
+};
+
 /** Word minimo con encabezado, parrafo y una tabla de 3x2. */
 const DOCX_PATH = join(
   __dirname,
@@ -176,7 +218,7 @@ describe('document-extractor.util', () => {
   describe('1. PDF con texto nativo', () => {
     it('1.1 deberia extraer el texto sin OCR', async () => {
       // 1. Arrange
-      const buffer = readFileSync(NATIVE_PDF_PATH);
+      const buffer = readNativePdfFixture();
 
       // 2. Act
       const result = await extractTextFromBuffer(buffer, PDF_CONTENT_TYPE);
@@ -184,6 +226,33 @@ describe('document-extractor.util', () => {
       // 3. Assert
       expect(result.text).toContain('Nota de prensa institucional de UNUWARE');
       expect(result.failure).toBeNull();
+    });
+
+    it('1.1.1 deberia extraer el texto aunque el fixture llegue con CRLF', async () => {
+      // 1. Arrange: el PDF tal como lo deja un checkout de Windows anterior a
+      //    `.gitattributes` (sin restaurar, pdf.js responde `bad XRef entry`).
+      const original = readNativePdfFixture();
+      const restored = restoreLfLineEndings(toCrlfLineEndings(original));
+
+      // 2. Act
+      const result = await extractTextFromBuffer(restored, PDF_CONTENT_TYPE);
+
+      // 3. Assert: la restauracion es exacta y el extractor lee el documento.
+      expect(restored.equals(original)).toBe(true);
+      expect(result.failure).toBeNull();
+      expect(result.text).toContain('Nota de prensa institucional de UNUWARE');
+    });
+
+    it('1.1.2 no deberia alterar un buffer que ya esta en LF', () => {
+      // 1. Arrange
+      const original = readFileSync(NATIVE_PDF_PATH);
+
+      // 2. Act
+      const restored = restoreLfLineEndings(original);
+
+      // 3. Assert: sin `\r\n` no hay nada que cambiar.
+      expect(original.includes('\r\n')).toBe(false);
+      expect(restored.equals(original)).toBe(true);
     });
 
     it('1.2 deberia devolver el motivo, y no lanzar, ante un PDF corrupto', async () => {

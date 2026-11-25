@@ -1,0 +1,9 @@
+# Nada de esto debe entrar en el contexto de build (PRODUCTION_DEPS_GUIDE.md §4).
+node_modules
+dist
+.quasar
+coverage
+*.log
+# Los .env nunca entran en la imagen: las VITE_* llegan como build args.
+.env*
+.git
