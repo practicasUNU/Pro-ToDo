@@ -17,6 +17,7 @@ Documento vivo — actualizar ante cualquier script nuevo en `backend/package.js
   - [2.3 Acceso interactivo a psql](#23-acceso-interactivo-a-psql)
   - [2.4 Automatización vía slash command](#24-automatización-vía-slash-command)
   - [2.5 Stack completo en Docker (perfil app)](#25-stack-completo-en-docker-perfil-app)
+  - [2.6 Equivalencias: Node nativo frente a contenedor](#26-equivalencias-node-nativo-frente-a-contenedor)
 - [3. Migraciones de Base de Datos](#3-migraciones-de-base-de-datos)
   - [3.1 Aplicar una migración](#31-aplicar-una-migración)
   - [Verificación del backend antes de cerrar un cambio](#verificación-del-backend-antes-de-cerrar-un-cambio)
@@ -165,6 +166,29 @@ Las llaves con `:?` abortan con el mensaje indicado si la variable no está expo
   Jest con `docker compose run --rm`. `npm run test:*` queda para equipos con Node.js (§4.3).
 - Puertos, variables que sobrescribe el `docker-compose.yml` y resolución de problemas:
   [`docs/INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md).
+
+### 2.6 Equivalencias: Node nativo frente a contenedor
+
+Para equipos sin Node.js en el anfitrión. `$C` abrevia `docker compose --env-file backend/.env`
+(en Windows, `backend\.env`). El porqué de cada fila, la diferencia entre las etapas `runtime` y
+`test` y la colisión de puertos están en
+[`INSTALACION_Y_ENTORNO.md` §1.5](INSTALACION_Y_ENTORNO.md#15-modos-de-operación-100--docker-vs-desarrollo-híbrido-con-node-local).
+
+| Nativo (desde `backend/`) | En contenedor | Perfil |
+|---|---|---|
+| `npm run start:dev` | `$C --profile app up -d --build` (sin recarga en caliente: reconstruir tras cada cambio) | `app` |
+| `npm run build` | `$C --profile test run --rm backend-test npm run build` | `test` |
+| `npx tsc --noEmit -p tsconfig.build.json` | `$C --profile test run --rm backend-test npx tsc --noEmit -p tsconfig.build.json` | `test` |
+| `npm test` | `scripts/test-linux.sh unit` / `scripts\test-windows.bat unit` | `test` |
+| `npm run test:e2e` | `scripts/test-linux.sh e2e` / `scripts\test-windows.bat e2e` | `test` |
+| `npm run db:migrate` | `scripts/migrate-linux.sh` / `scripts\migrate-windows.bat` | — |
+| `npm run test:bootstrap` | `scripts/migrate-*` (crea `E2E_DB_NAME` si falta) | — |
+
+- El contenedor `backend` (etapa `runtime`, `npm ci --omit=dev`) no tiene TypeScript, Nest CLI ni
+  Jest: los comandos de compilación y pruebas van siempre contra `backend-test`, que se reconstruye
+  con `$C --profile test build backend-test` (los `test-*` lo hacen solos).
+- Con el perfil `app` levantado no se lanza `npm run start:dev` ni `quasar dev`: `PORT` y
+  `FRONTEND_PORT` ya están ocupados.
 
 ---
 

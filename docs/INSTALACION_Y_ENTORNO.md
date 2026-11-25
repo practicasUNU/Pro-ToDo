@@ -8,6 +8,9 @@ modos de trabajo, y los dos usan PostgreSQL en Docker (`security-and-scope.md` �
 | **Stack completo** (perfil `app`) | PostgreSQL, Redis, backend, frontend (Nginx) | Nada (solo Docker) | Demos, pruebas de integración, equipos sin Node.js |
 | **Desarrollo** (sin perfil) | Solo PostgreSQL | Backend (`npm run start:dev`) y frontend (`npm run dev`) | Programar con recarga en caliente |
 
+Qué comando corresponde a cada modo, y por qué no se mezclan:
+[§1.5](#15-modos-de-operación-100--docker-vs-desarrollo-híbrido-con-node-local).
+
 Comandos del día a día: [`docs/commands.md`](commands.md). Dependencias y auditoría:
 [`docs/PRODUCTION_DEPS_GUIDE.md`](PRODUCTION_DEPS_GUIDE.md).
 
@@ -22,6 +25,9 @@ Comandos del día a día: [`docs/commands.md`](commands.md). Dependencias y audi
   - [1.2 Configuración centralizada en backend/.env](#12-configuración-centralizada-en-backendenv)
   - [1.3 Variables que sobrescribe docker-compose.yml](#13-variables-que-sobrescribe-docker-composeyml)
   - [1.4 Perímetro de red en Docker](#14-perímetro-de-red-en-docker)
+  - [1.5 Modos de operación: 100 % Docker vs. desarrollo híbrido con Node local](#15-modos-de-operación-100--docker-vs-desarrollo-híbrido-con-node-local)
+    - [backend (target: runtime) frente a backend-test (target: test)](#backend-target-runtime-frente-a-backend-test-target-test)
+    - [Colisión de puertos y recarga de cambios](#colisión-de-puertos-y-recarga-de-cambios)
 - [2. Entorno en Linux (Ubuntu / Zorin OS / Debian / Arch)](#2-entorno-en-linux-ubuntu--zorin-os--debian--arch)
   - [2.1 Prerrequisitos](#21-prerrequisitos)
   - [2.2 Puesta en marcha con los scripts](#22-puesta-en-marcha-con-los-scripts)
@@ -166,6 +172,61 @@ equipo llega al panel. Si se expone en la LAN (`FRONTEND_BIND_ADDRESS=0.0.0.0`):
 
 Si la subred `172.28.0.0/16` choca con otra red de tu equipo, cámbiala en `docker-compose.yml`
 (bloque `networks`) y en la línea de `ALLOWED_IP_RANGES`.
+
+### 1.5 Modos de operación: 100 % Docker vs. desarrollo híbrido con Node local
+
+| | **100 % Docker** | **Híbrido con Node local** |
+|---|---|---|
+| Anfitrión típico | Windows, o un evaluador con solo Docker | Linux con Node.js 24.16.0 (`.nvmrc`) |
+| Qué hay instalado | Docker | Docker + Node.js/npm (y `psql`, opcional) |
+| Qué corre en Docker | `postgres`, `redis`, `backend`, `frontend` (perfil `app`) y, a demanda, `backend-test` (perfil `test`) | Solo `postgres` (sin perfil). `redis` si hace falta: `--profile app up -d redis` |
+
+Equivalencia de comandos. `$C` abrevia `docker compose --env-file backend/.env`; en Windows,
+`backend\.env` y `scripts\*.bat`:
+
+| Tarea | 100 % Docker | Híbrido con Node local |
+|---|---|---|
+| Levantar la aplicación | `scripts/setup-linux.sh` / `scripts\setup-windows.bat` (perfil `app`) | `$C up -d` (postgres) + `npm run start:dev` en `backend/` + `npx quasar dev` en `frontend/` |
+| Aplicar migraciones | `scripts/migrate-linux.sh` / `scripts\migrate-windows.bat` | Lo mismo, o `npm run db:migrate --prefix backend` (`psql` del anfitrión) |
+| Base de las e2e (`E2E_DB_NAME`) | La crean y migran `setup-*` / `migrate-*` | Lo mismo, o `npm run test:bootstrap --prefix backend` |
+| Pruebas Jest del backend | `scripts/test-linux.sh [unit\|e2e\|all]` / `scripts\test-windows.bat` (§4) | `npm test` / `npm run test:e2e` en `backend/` |
+| Logs del backend | `$C --profile app logs -f backend` | La consola de `start:dev` y los `.log` de `backend/logs/` (`LOG_DIR`) |
+| Compilar el backend | `$C --profile test run --rm backend-test npm run build` | `npm run build` en `backend/` |
+| Tipos del backend | `$C --profile test run --rm backend-test npx tsc --noEmit -p tsconfig.build.json` | `npx tsc --noEmit -p tsconfig.build.json` en `backend/` |
+| Compilar el frontend | `$C --profile app build frontend` (`quasar build` en la etapa `build`, con el `vite-plugin-checker` de `quasar.config.ts`) | `npx vue-tsc --noEmit` y `npm run build` en `frontend/` |
+| Pruebas del frontend (Vitest) | Sin equivalente: no hay servicio de pruebas del frontend | `npm test` en `frontend/` |
+| Aplicar un cambio de código | Reconstruir: `$C --profile app up --build -d` | Automático: recarga en caliente |
+
+#### `backend` (`target: runtime`) frente a `backend-test` (`target: test`)
+
+Los dos salen de `backend/Dockerfile`, pero de etapas distintas:
+
+- **`protodo_backend`** (etapa `runtime`) instala con `npm ci --omit=dev`: lleva `dist/`, las
+  dependencias de producción y Chromium, y **no** incluye TypeScript, Nest CLI ni Jest. No sirve
+  para compilar ni para probar: `docker compose exec backend npm run build` falla.
+- **`backend-test`** (etapa `test`, `FROM deps`) conserva las devDependencies y el código fuente.
+  Es efímero y sirve para cualquier comando puntual de verificación en un equipo sin Node:
+
+  ```bash
+  docker compose --env-file backend/.env --profile test build backend-test   # código actual
+  docker compose --env-file backend/.env --profile test run --rm backend-test <comando>
+  # p. ej.: npm run build | npx tsc --noEmit -p tsconfig.build.json | npm test -- <ruta.spec.ts>
+  ```
+
+  El código va **copiado** en la imagen: tras cambiarlo hay que volver a hacer `build` (los
+  `test-*` lo hacen solos). Lleva la guarda de la base de pruebas descrita en §4.
+
+#### Colisión de puertos y recarga de cambios
+
+- Con `--profile app` levantado, `protodo_backend` ya ocupa `PORT` y `protodo_frontend`,
+  `FRONTEND_PORT`. **No** lances `npm run start:dev` ni `quasar dev` a la vez: el backend nativo
+  fallaría con `EADDRINUSE` en `PORT`, y aunque cambiaras el puerto, tendrías dos motores FSM
+  contra la misma base procesando las mismas ejecuciones.
+- Para pasar del modo Docker al híbrido, para solo la aplicación y deja la base:
+  `docker compose --env-file backend/.env --profile app stop backend frontend`.
+- Sin Node local no hay recarga en caliente: las imágenes llevan el código copiado, no montado. Un
+  cambio en el código fuente se aplica reconstruyendo:
+  `docker compose --env-file backend/.env --profile app up --build -d`.
 
 ---
 
