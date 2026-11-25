@@ -1,3 +1,18 @@
+# Infraestructura de Proto-Do.
+#
+# Sin perfil (`docker compose up -d`) solo arranca PostgreSQL: es lo que necesita
+# el desarrollo diario con `npm run start:dev` y `npm run dev` en el anfitrion.
+# El stack completo (Redis + backend + frontend en contenedores) va tras el
+# perfil `app`, que es el que usan `scripts/setup-linux.sh` y
+# `scripts\setup-windows.bat`:
+#
+#   docker compose --env-file backend/.env --profile app up -d --build
+#
+# La interpolacion `${...}` se resuelve con el `.env` junto a este archivo (en
+# Linux, symlink a `backend/.env`) o con `--env-file backend/.env`, que es lo que
+# pasan los scripts para no depender del symlink en Windows.
+# Guia completa: docs/INSTALACION_Y_ENTORNO.md
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,12 +23,117 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+      # Solo los lee `02-bootstrap.sh`, y solo en el primer arranque del volumen.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
     ports:
       - "${DB_PORT:-5433}:5432"
     volumes:
       - pgdata_protodo:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Orden alfabetico: primero el esquema final y despues el bootstrap
+      # (baseline de `schema_migrations`, ADMIN y semilla 069).
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./db/docker-init/02-bootstrap.sh:/docker-entrypoint-initdb.d/02-bootstrap.sh:ro
+      - ./db/migrations:/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - protodo_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: protodo_redis
+    restart: unless-stopped
+    profiles: ["app"]
+    # Provisionado para las colas BullMQ (`architecture-patterns.md` §5); el
+    # backend aun no registra `BullModule`, de modo que hoy no lo consume.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata_protodo:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - protodo_net
+
+  backend:
+    build:
+      context: ./backend
+    image: protodo-backend:local
+    container_name: protodo_backend
+    restart: unless-stopped
+    profiles: ["app"]
+    env_file:
+      - ./backend/.env
+    # Sobrescrituras propias del contenedor: el resto sale de `backend/.env`.
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-8080}
+      LOG_DIR: /app/logs
+      # Tras el Nginx del frontend, el cliente llega con la IP de la pasarela de
+      # `protodo_net`: sin esta subred el perimetro (PROT-05) responderia 403.
+      ALLOWED_IP_RANGES: ${ALLOWED_IP_RANGES:-},172.28.0.0/16
+    # Solo en loopback: desde fuera se entra por el Nginx del frontend.
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-3000}:3000"
+    volumes:
+      - backend_logs:/app/logs
+      - backend_uploads:/app/static/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - protodo_net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Relativa: Nginx enruta `/api` y `/api/socket.io` al backend, y el
+        # cliente de sockets toma el origen del documento (socket.client.ts).
+        VITE_API_BASE_URL: /api
+        VITE_ACCEPTED_EMAIL_DOMAINS: ${ACCEPTED_EMAIL_DOMAINS:-}
+    image: protodo-frontend:local
+    container_name: protodo_frontend
+    restart: unless-stopped
+    profiles: ["app"]
+    # Por defecto solo en loopback. Para exponerlo en la LAN:
+    # FRONTEND_BIND_ADDRESS=0.0.0.0 (ver la guia, seccion del perimetro de red).
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend
+    networks:
+      - protodo_net
+
+networks:
+  protodo_net:
+    name: protodo_net
+    ipam:
+      config:
+        # Subred fija para poder nombrarla en ALLOWED_IP_RANGES.
+        - subnet: 172.28.0.0/16
 
 volumes:
   pgdata_protodo:
     name: pgdata_protodo
+  redisdata_protodo:
+    name: redisdata_protodo
+  backend_logs:
+    name: protodo_backend_logs
+  backend_uploads:
+    name: protodo_backend_uploads
