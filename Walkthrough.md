@@ -9604,3 +9604,11 @@ mapeador.
 - **Por que `integration` se rechaza:** solo existen dos configuraciones de Jest (`npm test` con `rootDir: src` y `test/jest-e2e.json`). Un alias haria creer que hay una tercera suite.
 - **Por que el runner reconstruye `backend-test` antes de `run`:** el codigo va copiado en la imagen; sin `build`, `run` ejecutaria una version anterior del codigo.
 - [ ] Prueba real en Docker (ver PLAN)
+
+## Propagacion de `BOOTSTRAP_ADMIN_EMAIL`, LF y Chromium en `backend-test`
+
+- **Por que `-e BOOTSTRAP_ADMIN_EMAIL` en el `exec`:** `docker compose exec` no relee `backend/.env`; hereda el entorno con el que se CREO el contenedor. Una variable anadida despues llegaba vacia a `02-bootstrap.sh`. Pasarla explicita la hace independiente de cuando se creo el contenedor; la guarda del script, ademas, explica como recrearlo.
+- **Por que quitar el CR al consumir y no solo con `.gitattributes`:** las reglas ya existian, pero un checkout anterior a ellas conserva CRLF hasta renormalizar, y Git no lo hace solo. Un `\r` en un `.sql` acaba dentro de las columnas TEXT (`texto_prompt`) y rompe las comparaciones exactas; en un `.sh`, bash ni arranca. Se limpia en el punto de consumo (`tr -d '\r'` dentro del contenedor, donde siempre hay `tr`), sin tocar el arbol de trabajo.
+- **Por que `additional_contexts` en vez de montajes:** un montaje `:ro` no se puede normalizar. Copiar `db/migrations` y `with-test-env.sh` en la imagen permite pasarles `sed` y las rutas finales (`/db/migrations`, `/scripts/`) no cambian para los specs.
+- **Por que Chromium en la etapa `test` y no en `deps`:** `deps` alimenta tambien `build`; meter alli Chromium y sus librerias engordaria esa etapa sin necesidad. En `test`, antes del `COPY . .`, la capa se reutiliza de la cache entre cambios de codigo.
+- **Por que los `.bat` quedan `i/lf w/crlf` y no `i/crlf`:** con `text eol=crlf` Git normaliza a LF en el indice y convierte al hacer checkout; `i/crlf` exigiria desactivar la normalizacion (`-text`).

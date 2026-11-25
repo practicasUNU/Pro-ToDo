@@ -153,8 +153,15 @@ services:
   backend-test:
     build:
       context: ./backend
-      # Etapa con devDependencies (backend/Dockerfile); el runtime no las tiene.
+      # Etapa con devDependencies y Chromium (backend/Dockerfile); el runtime
+      # no las tiene.
       target: test
+      # Lo que las suites leen fuera de `backend/`. Se COPIA en la imagen (y no
+      # se monta) para quitarle el CR de un checkout de Windows; tras cambiar
+      # una migracion hay que reconstruir (`scripts/test-*` ya lo hacen).
+      additional_contexts:
+        migrations: ./db/migrations
+        repo-scripts: ./scripts
     image: protodo-backend-test:local
     # Efimero (`run --rm`): sin container_name ni puertos publicados.
     profiles: ["test"]
@@ -174,11 +181,6 @@ services:
       # El guard compara con el DB_NAME de `backend/.env` (lo lee de /app/.env):
       # sin el archivo, el DB_NAME heredado contaria como override explicito.
       - ./backend/.env:/app/.env:ro
-      # Desde /app/test/helpers, `../../../db/migrations` es /db/migrations
-      # (prompt-migrations.helper.ts).
-      - ./db/migrations:/db/migrations:ro
-      # Desde /app/test/e2e, la raiz del repo es `/` (test-database-env.e2e-spec.ts).
-      - ./scripts/with-test-env.sh:/scripts/with-test-env.sh:ro
     depends_on:
       postgres:
         condition: service_healthy

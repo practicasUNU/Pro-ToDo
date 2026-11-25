@@ -27,8 +27,23 @@
   set -euo pipefail
 
   # Segunda guarda tras el `${BOOTSTRAP_ADMIN_EMAIL:?}` de docker-compose.yml:
-  # sin correo no hay un ADMIN conocido con el que entrar al panel.
-  : "${BOOTSTRAP_ADMIN_EMAIL:?BOOTSTRAP_ADMIN_EMAIL vacio: definela en backend/.env}"
+  # sin correo no hay un ADMIN conocido con el que entrar al panel. El caso
+  # tipico NO es olvidarla: es haberla anadido a `backend/.env` despues de crear
+  # el contenedor, que conserva el entorno de su creacion (`docker compose exec`
+  # lo hereda). Por eso el mensaje dice como recrearlo. Sin correos de ejemplo.
+  if [[ -z "${BOOTSTRAP_ADMIN_EMAIL:-}" ]]; then
+    cat >&2 <<'MSG'
+[bootstrap] BOOTSTRAP_ADMIN_EMAIL esta vacia. Definela en backend/.env
+(ver backend/.env.example): es la cuenta ADMIN que se siembra, y tiene que ser
+un buzon real porque el acceso es por OTP.
+
+Si YA esta definida en backend/.env, el contenedor `postgres` sigue con el
+entorno con el que se creo. Recrealo para que cargue el actual (el volumen
+de datos se conserva):
+  docker compose --env-file backend/.env --profile app up -d postgres
+MSG
+    exit 1
+  fi
 
   MIGRATIONS_DIR="/migrations"
   SEED_MIGRATIONS=(069)
@@ -74,7 +89,8 @@ SQL
     fi
 
     echo "== [bootstrap] Semilla $(basename "${seed_files[0]}")"
-    psql_run -f "${seed_files[0]}" > /dev/null
+    # Sin CR: con un checkout CRLF la semilla meteria `\r` en texto_prompt.
+    tr -d '\r' < "${seed_files[0]}" | psql_run > /dev/null
   done
 
   echo "== [bootstrap] Listo"

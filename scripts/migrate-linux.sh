@@ -90,9 +90,15 @@ bootstrap_e2e_database() {
   "${COMPOSE[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet \
     -U "${DB_USER}" -d postgres -v db="${db}" <<< 'CREATE DATABASE :"db";'
 
-  if psql_in "${db}" -f /docker-entrypoint-initdb.d/01-init.sql > /dev/null \
-    && "${COMPOSE[@]}" exec -T -e POSTGRES_DB="${db}" postgres \
-      bash /docker-entrypoint-initdb.d/02-bootstrap.sh; then
+  # Los archivos montados vienen del arbol de trabajo: si tienen CRLF (checkout
+  # de Windows), se les quita el CR DENTRO del contenedor antes de usarlos.
+  # BOOTSTRAP_ADMIN_EMAIL va explicita con `-e`: `exec` hereda el entorno con
+  # el que se CREO el contenedor, no el `backend/.env` actual.
+  if "${COMPOSE[@]}" exec -T -e "PGUSER=${DB_USER}" -e "PGDATABASE=${db}" postgres \
+      sh -c "tr -d '\r' < /docker-entrypoint-initdb.d/01-init.sql | psql -X -v ON_ERROR_STOP=1 --quiet" > /dev/null \
+    && "${COMPOSE[@]}" exec -T -e "POSTGRES_DB=${db}" \
+      -e "BOOTSTRAP_ADMIN_EMAIL=${BOOTSTRAP_ADMIN_EMAIL}" postgres \
+      sh -c "tr -d '\r' < /docker-entrypoint-initdb.d/02-bootstrap.sh > /tmp/protodo-02-bootstrap.sh && bash /tmp/protodo-02-bootstrap.sh"; then
     return 0
   fi
 
@@ -154,7 +160,9 @@ MSG
       echo "-- registrando (sin ejecutar) ${version}"
     else
       echo "-- aplicando ${version}"
-      psql_in "${db}" < "${file}"
+      # Sin CR: un checkout con CRLF meteria `\r` en las columnas TEXT de las
+      # semillas (texto_prompt) y romperia las comparaciones exactas.
+      tr -d '\r' < "${file}" | psql_in "${db}"
     fi
 
     # El registro va DESPUES: si la migracion falla, `set -e` corta antes y el

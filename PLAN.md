@@ -5429,3 +5429,12 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] `docker compose ... --profile app --profile test config --quiet`, `bash -n`, despacho de argumentos y guardas de `test-linux.sh`
 - [ ] `sudo scripts/test-linux.sh unit` (y `e2e`) con acceso al socket de Docker
 - [ ] `scripts\test-windows.bat` y creacion de `E2E_DB_NAME` en Windows 11
+
+## Propagacion de `BOOTSTRAP_ADMIN_EMAIL`, LF y Chromium en `backend-test`
+
+- **`migrate-*` / `bootstrap_e2e_database`:** `-e BOOTSTRAP_ADMIN_EMAIL` junto a `-e POSTGRES_DB` en el `exec` de `02-bootstrap.sh`; `init.sql`, `02-bootstrap.sh` y cada migracion pasan por `tr -d '\r'` (en Windows dentro del contenedor, con `PGUSER`/`PGDATABASE` por `-e`).
+- **`02-bootstrap.sh`:** guarda con mensaje accionable (recrear con `docker compose --env-file backend/.env --profile app up -d postgres`), sin correos; la semilla 069 se carga sin CR.
+- **`backend/Dockerfile` (`test`):** `npx playwright install --with-deps chromium` en `/ms-playwright` (`a+rX`); `db/migrations` y `scripts/with-test-env.sh` copiados via `additional_contexts` y normalizados con `sed 's/\r$//'`. Runtime intacto.
+- **`docker-compose.yml`:** `backend-test` con `additional_contexts` (`migrations`, `repo-scripts`); solo monta `backend/.env`.
+- [x] Guarda de `02-bootstrap.sh` con `BOOTSTRAP_ADMIN_EMAIL=""` (exit 1, comando de recreacion, sin `@`); simulacion CRLF -> `tr -d` en el anfitrion; `config --quiet` con perfiles `app` y `test`
+- [ ] `build backend-test` + `e2e` de `test-database-env`, `pipeline-seeds-integrity` y `telemetry` en Docker (pendiente de ejecucion con acceso al socket)

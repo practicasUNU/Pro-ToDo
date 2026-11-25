@@ -565,7 +565,9 @@ además:
 | `migrate-windows.bat` intenta aplicar desde la `001` y falla en la `005` | Versión antigua del script: comparaba con `findstr /x` sobre la salida LF de `psql` y no detectaba ninguna aplicada | Actualiza el repositorio; el script actual normaliza la lista a CRLF y muestra «N migraciones ya registradas» |
 | `password authentication failed` tras cambiar `DB_PASSWORD` | El volumen guardó las credenciales del primer arranque | Restaura las credenciales antiguas, o recrea el volumen (**borra los datos**): `docker compose --env-file backend\.env down -v` |
 | `E2E_DB_NAME ... existe pero no tiene schema_migrations` | Base de pruebas creada a mano o por una versión anterior | `docker compose --env-file backend\.env exec postgres dropdb -U <DB_USER> <E2E_DB_NAME>` y vuelve a lanzar `scripts\migrate-windows.bat` |
-| `/usr/bin/env: 'bash\r': No such file or directory` en un contenedor | Un `.sh` con CRLF (clon anterior a `.gitattributes`) | Renormaliza (§3.1, paso 4) y `docker compose ... up -d --build` |
+| `02-bootstrap.sh` dice que `BOOTSTRAP_ADMIN_EMAIL` está vacía aunque está en `backend\.env` (también en Linux) | `docker compose exec` hereda el entorno con el que se **creó** el contenedor `postgres`; si añadiste o cambiaste la variable después, el contenedor no la ve | Recrea el contenedor para que cargue el `backend\.env` actual, **sin perder** el volumen `pgdata_protodo`: `docker compose --env-file backend/.env --profile app up -d postgres`. Los `migrate-*` actuales ya la pasan con `-e` al crear la base E2E |
+| `/usr/bin/env: 'bash\r': No such file or directory`, `$'\r': command not found` o `set: pipefail` en un contenedor | Un `.sh` con CRLF (clon anterior a `.gitattributes`) | Renormaliza (§3.1, paso 4) y `docker compose ... up -d --build`. Los scripts ya se defienden: quitan el CR dentro del contenedor al usar `init.sql`, `02-bootstrap.sh` y las migraciones, y la imagen `backend-test` normaliza su copia |
+| `pipeline-seeds-integrity` falla comparando `texto_prompt` | La base E2E se sembró con `.sql` en CRLF y las columnas `TEXT` guardaron `\r\n` | Renormaliza el checkout, borra la base E2E (`docker compose --env-file backend/.env exec postgres dropdb -U <DB_USER> <E2E_DB_NAME>`) y vuelve a lanzar `migrate-*`, que ahora quita el CR antes de `psql` |
 | El panel responde 403 en todas las llamadas | La IP que ve el backend no está en el perímetro | Revisa `docker compose ... logs backend` y §1.4 |
 
 ### 3.5 Solución de problemas en Windows 11
@@ -657,15 +659,18 @@ desconocido termina con código `2` sin tocar Docker.
 
 **Qué lleva el contenedor `backend-test`:**
 
-- La etapa `test` de `backend/Dockerfile` (`FROM deps`): código completo y devDependencies. No
-  cambia la imagen `runtime` del servicio `backend`.
+- La etapa `test` de `backend/Dockerfile` (`FROM deps`): código completo, devDependencies y el
+  Chromium de Playwright (`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`), que necesita la exportación a
+  PDF de `telemetry.e2e-spec.ts`. No cambia la imagen `runtime` del servicio `backend`.
 - `env_file: backend/.env`, con `NODE_ENV=test`, `DB_HOST=postgres` y `REDIS_HOST=redis`.
 - **Guarda de la base:** `DB_NAME` se sobrescribe con `E2E_DB_NAME`, y `backend/.env` se monta en
   `/app/.env` (solo lectura) para que `test/helpers/e2e-database.guard.ts` compare con la base de
   desarrollo exactamente igual que en el anfitrión. Si `E2E_DB_NAME` está vacía o coincide con
   `DB_NAME`, las e2e abortan antes de conectar.
-- Montajes de solo lectura de lo que las suites leen fuera de `backend/`: `db/migrations` (en
-  `/db/migrations`) y `scripts/with-test-env.sh` (en `/scripts/`).
+- Lo que las suites leen fuera de `backend/` —`db/migrations` (en `/db/migrations`) y
+  `scripts/with-test-env.sh` (en `/scripts/`)— se **copia** en la imagen con `additional_contexts`
+  de compose, y en la copia se quitan los CR de un checkout de Windows. Por eso, tras cambiar una
+  migración hay que reconstruir `backend-test` (los `test-*` lo hacen siempre).
 
 ## 5. Verificación del entorno
 

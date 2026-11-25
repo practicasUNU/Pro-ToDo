@@ -139,9 +139,16 @@ REM pelear con las comillas de cmd.exe dentro de -c.
 %COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d postgres -v "db=%NEW_DB%" < "%SQL_FILE%"
 if errorlevel 1 exit /b 1
 
-%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%NEW_DB%" -f /docker-entrypoint-initdb.d/01-init.sql >nul
+REM Los archivos montados vienen del arbol de trabajo: con un checkout CRLF se
+REM les quita el CR DENTRO del contenedor, que es donde hay `tr`. psql toma
+REM usuario y base de PGUSER/PGDATABASE: sin comillas anidadas que cmd.exe
+REM pueda romper. Las tuberias y redirecciones van dentro de las comillas de
+REM sh -c: las interpreta el sh del contenedor, no cmd.exe.
+%COMPOSE% exec -T -e "PGUSER=%DB_USER%" -e "PGDATABASE=%NEW_DB%" postgres sh -c "tr -d '\r' < /docker-entrypoint-initdb.d/01-init.sql | psql -X -v ON_ERROR_STOP=1 --quiet" >nul
 if errorlevel 1 goto :bootstrap_e2e_failed
-%COMPOSE% exec -T -e "POSTGRES_DB=%NEW_DB%" postgres bash /docker-entrypoint-initdb.d/02-bootstrap.sh
+REM BOOTSTRAP_ADMIN_EMAIL va explicita: `exec` hereda el entorno con el que se
+REM CREO el contenedor, no el backend\.env actual.
+%COMPOSE% exec -T -e "POSTGRES_DB=%NEW_DB%" -e "BOOTSTRAP_ADMIN_EMAIL=%BOOTSTRAP_ADMIN_EMAIL%" postgres sh -c "tr -d '\r' < /docker-entrypoint-initdb.d/02-bootstrap.sh > /tmp/protodo-02-bootstrap.sh && bash /tmp/protodo-02-bootstrap.sh"
 if errorlevel 1 goto :bootstrap_e2e_failed
 del "%SQL_FILE%" >nul 2>&1
 exit /b 0
@@ -232,7 +239,9 @@ goto :eof
 :migrate_file_pending
 if "%BASELINE%"=="1" goto :migrate_file_baseline
 echo -- aplicando %VERSION%
-%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" < "%MIGRATIONS_DIR%\%VERSION%"
+REM Sin CR: un checkout CRLF meteria \r en las columnas TEXT de las semillas
+REM (texto_prompt). `tr` corre en el contenedor; el archivo llega por stdin.
+%COMPOSE% exec -T -e "PGUSER=%DB_USER%" -e "PGDATABASE=%TARGET_DB%" postgres sh -c "tr -d '\r' | psql -X -v ON_ERROR_STOP=1 --quiet" < "%MIGRATIONS_DIR%\%VERSION%"
 if errorlevel 1 goto :migrate_file_error
 goto :migrate_file_register
 
