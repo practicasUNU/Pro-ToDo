@@ -149,6 +149,7 @@ Las llaves con `:?` abortan con el mensaje indicado si la variable no está expo
 | Instalar, arrancar y migrar | `scripts/setup-linux.sh` | `scripts\setup-windows.bat` |
 | Solo migraciones pendientes | `scripts/migrate-linux.sh` | `scripts\migrate-windows.bat` |
 | Adoptar una base ya migrada | `scripts/migrate-linux.sh --baseline` | `scripts\migrate-windows.bat --baseline` |
+| Pruebas Jest en Docker (`unit`, `e2e` o `all`) | `scripts/test-linux.sh [unit\|e2e\|all]` | `scripts\test-windows.bat [unit\|e2e\|all]` |
 | Arrancar a mano | `docker compose --env-file backend/.env --profile app up -d --build` | ídem con `backend\.env` |
 | Detener (conserva volúmenes) | `docker compose --env-file backend/.env --profile app down` | ídem |
 
@@ -156,6 +157,12 @@ Las llaves con `:?` abortan con el mensaje indicado si la variable no está expo
 - Los scripts de migración usan `docker compose exec -T postgres psql`: no requieren `psql` en el
   anfitrión y llevan la cuenta en `schema_migrations`, igual que `scripts/apply-migrations.sh`
   (§3.1.1), que sigue disponible para quien use el `psql` del anfitrión.
+- Si `E2E_DB_NAME` tiene valor, `setup-*` y `migrate-*` **crean** esa base dentro del contenedor
+  cuando falta (`init.sql` + `db/docker-init/02-bootstrap.sh`, como un volumen nuevo) y la migran
+  junto a `DB_NAME`. Sin Node no hace falta `npm run test:bootstrap`.
+- `test-*` levanta `postgres` y `redis`, migra las dos bases, reconstruye el servicio efímero
+  `backend-test` (perfil `test`, etapa `test` de `backend/Dockerfile`, con devDependencies) y lanza
+  Jest con `docker compose run --rm`. `npm run test:*` queda para equipos con Node.js (§4.3).
 - Puertos, variables que sobrescribe el `docker-compose.yml` y resolución de problemas:
   [`docs/INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md).
 
@@ -322,6 +329,11 @@ Todos los comandos se ejecutan desde `backend/`.
 | `npm run test:debug` | `--inspect-brk --runInBand` para depuración paso a paso. |
 | `npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte) contra la base de `E2E_DB_NAME`. Aborta antes de conectar si falta o coincide con `DB_NAME` (ver §4.3.1). |
 
+> **Sin Node.js en el anfitrión** (Windows, evaluadores con solo Docker): `scripts/test-linux.sh` o
+> `scripts\test-windows.bat` con `unit`, `e2e` o `all` (por defecto) ejecutan estas mismas suites dentro
+> del contenedor `backend-test` (§2.5). No hay suite `integration`: las pruebas con base de datos real
+> son las `e2e`.
+
 #### 4.3.1 Base de las pruebas E2E (`E2E_DB_NAME`)
 
 Se declara una vez en `backend/.env`: `E2E_DB_NAME='<nombre_bd_test>'`, distinto de `DB_NAME`.
@@ -337,7 +349,9 @@ y se replica en `scripts/with-test-env.sh` (envoltorio de los dos scripts de bas
 | `E2E_DB_NAME` vacío o igual a `DB_NAME` | **aborta** (exit 1) sin conectar |
 
 `test:bootstrap` deja la base sembrada (§3.1.2), incluida la `069` que valida
-`pipeline-seeds-integrity.e2e-spec.ts`.
+`pipeline-seeds-integrity.e2e-spec.ts`. Sin Node ni `psql` en el anfitrión, `migrate-linux.sh` /
+`migrate-windows.bat` (y los `setup-*`) hacen lo mismo dentro del contenedor cuando la base no
+existe (§2.5).
 
 > `jest.rootDir` es `src`, así que **un `.spec.ts` colocado en `backend/test/` no lo ejecuta `npm test`**. Los specs unitarios viven junto al fuente; `backend/test/` alberga factories, fixtures y los `*.e2e-spec.ts`.
 

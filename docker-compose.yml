@@ -8,6 +8,12 @@
 #
 #   docker compose --env-file backend/.env --profile app up -d --build
 #
+# El perfil `test` anade `backend-test`, un contenedor efimero con las
+# devDependencies para ejecutar Jest sin Node en el anfitrion
+# (`scripts/test-linux.sh`, `scripts\test-windows.bat`):
+#
+#   docker compose --env-file backend/.env --profile test run --rm backend-test npm test
+#
 # CONFIGURACION. Todo valor de entorno sale de `backend/.env` (contrato:
 # `backend/.env.example`). Aqui no hay valores por defecto: si falta una variable
 # obligatoria (`${VAR:?...}`), compose se niega a arrancar y dice cual. Compose
@@ -64,7 +70,8 @@ services:
     image: redis:7-alpine
     container_name: protodo_redis
     restart: unless-stopped
-    profiles: ["app"]
+    # Tambien en `test`: `backend-test` depende de el.
+    profiles: ["app", "test"]
     # Provisionado para las colas BullMQ (`architecture-patterns.md` §5); el
     # backend aun no registra `BullModule`, de modo que hoy no lo consume.
     command: ["redis-server", "--appendonly", "yes", "--port", "${REDIS_PORT:?REDIS_PORT definela en backend/.env (ver backend/.env.example)}"]
@@ -140,6 +147,43 @@ services:
       - "${FRONTEND_BIND_ADDRESS:?FRONTEND_BIND_ADDRESS definela en backend/.env (ver backend/.env.example)}:${FRONTEND_PORT:?FRONTEND_PORT definela en backend/.env (ver backend/.env.example)}:80"
     depends_on:
       - backend
+    networks:
+      - protodo_net
+
+  backend-test:
+    build:
+      context: ./backend
+      # Etapa con devDependencies (backend/Dockerfile); el runtime no las tiene.
+      target: test
+    image: protodo-backend-test:local
+    # Efimero (`run --rm`): sin container_name ni puertos publicados.
+    profiles: ["test"]
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: test
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      # GUARDA de la base de pruebas. `env_file` trae el DB_NAME de DESARROLLO;
+      # las suites e2e montan el AppModule real y borran filas. Aqui se fija la
+      # E2E, y `test/helpers/e2e-database.guard.ts` (con el `.env` montado abajo)
+      # aborta si esta vacia o coincide con DB_NAME. Las unitarias no la usan.
+      DB_NAME: ${E2E_DB_NAME:-}
+      ALLOWED_IP_RANGES: ${ALLOWED_IP_RANGES:-},172.28.0.0/16
+    volumes:
+      # El guard compara con el DB_NAME de `backend/.env` (lo lee de /app/.env):
+      # sin el archivo, el DB_NAME heredado contaria como override explicito.
+      - ./backend/.env:/app/.env:ro
+      # Desde /app/test/helpers, `../../../db/migrations` es /db/migrations
+      # (prompt-migrations.helper.ts).
+      - ./db/migrations:/db/migrations:ro
+      # Desde /app/test/e2e, la raiz del repo es `/` (test-database-env.e2e-spec.ts).
+      - ./scripts/with-test-env.sh:/scripts/with-test-env.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - protodo_net
 

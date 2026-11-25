@@ -5419,3 +5419,13 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Auditoria `rg` de literales, terminadores LF/CRLF y formato `version` comun a las tres piezas
 - [ ] Probar el stack completo con acceso al socket de Docker
 - [ ] Probar `setup-windows.bat` / `migrate-windows.bat` en Windows 11 (debe mostrar "0 aplicadas, 69 ya estaban" sobre un volumen recien creado)
+
+## BD de pruebas E2E y runner de Jest en Docker
+
+- **`backend/Dockerfile`:** etapa `test` (`FROM deps`, `COPY . .`, `CMD npm test`) entre `build` y `runtime`; el runtime sigue siendo el destino por defecto.
+- **`docker-compose.yml`:** servicio efimero `backend-test` (perfil `test`, `target: test`, `env_file`, `NODE_ENV=test`, `DB_HOST=postgres`, `REDIS_HOST=redis`, `DB_NAME=${E2E_DB_NAME:-}`, subred en `ALLOWED_IP_RANGES`). Monta `backend/.env` en `/app/.env`, `db/migrations` en `/db/migrations` y `scripts/with-test-env.sh` en `/scripts/`, todo `:ro`. `redis` pasa a `profiles: ["app", "test"]`.
+- **`migrate-*`:** si `E2E_DB_NAME` tiene valor y no existe, `bootstrap_e2e_database` (`CREATE DATABASE :"db"`, `init.sql`, `02-bootstrap.sh` con `POSTGRES_DB`) y migracion; si falla, borra la base recien creada. Sin referencias a `npm run test:bootstrap`.
+- **Runners:** `scripts/test-linux.sh` / `scripts\test-windows.bat` `[unit|e2e|all]` (por defecto `all`; `integration` se rechaza con codigo 2): validan `.env` y `E2E_DB_NAME`, `up -d --wait postgres redis`, `migrate-*`, `build backend-test` y `run --rm`.
+- [x] `docker compose ... --profile app --profile test config --quiet`, `bash -n`, despacho de argumentos y guardas de `test-linux.sh`
+- [ ] `sudo scripts/test-linux.sh unit` (y `e2e`) con acceso al socket de Docker
+- [ ] `scripts\test-windows.bat` y creacion de `E2E_DB_NAME` en Windows 11

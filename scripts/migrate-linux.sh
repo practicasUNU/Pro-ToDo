@@ -17,8 +17,14 @@
 # el script se detiene y pide `--baseline`, que registra todas como aplicadas
 # SIN ejecutarlas. Usalo una sola vez y solo si la base ya esta al dia.
 #
-# Si `E2E_DB_NAME` esta definida y esa base existe en el contenedor, se migra
-# tambien, para que la suite E2E no quede desfasada.
+# BASE E2E. Si `E2E_DB_NAME` tiene valor (y es distinta de DB_NAME), tambien se
+# atiende, sin npm ni psql en el anfitrion:
+#   - No existe -> se CREA como un volumen nuevo: `init.sql` + `02-bootstrap.sh`
+#     (baseline, ADMIN, semilla 069), y despues se migra. NO se le aplican las
+#     69 migraciones desde cero: la historia no se puede encadenar (la 005 toca
+#     `tipos_nodo`, que ya no existe; la 002 promueve un usuario inexistente...).
+#   - Existe con `schema_migrations` -> se migra como DB_NAME.
+#   - Existe sin `schema_migrations` -> se omite y se indica como recrearla.
 #
 # Configuracion: solo `backend/.env` (scripts/lib/env.sh), sin valores por
 # defecto. `psql` dentro del contenedor usa el puerto interno (PGPORT = DB_PORT),
@@ -71,6 +77,30 @@ until "${COMPOSE[@]}" exec -T postgres pg_isready -U "${DB_USER}" -d "${DB_NAME}
   fi
   sleep 2
 done
+
+# Crea E2E_DB_NAME desde cero dentro del contenedor, igual que el bootstrap de
+# un volumen nuevo. Si algo falla, borra la base RECIEN creada (y solo esa) para
+# no dejar una a medias que la siguiente ejecucion saltaria por no tener
+# `schema_migrations`.
+bootstrap_e2e_database() {
+  local db="$1"
+
+  echo "== Creando ${db} (E2E_DB_NAME): init.sql + bootstrap"
+  # `:"db"` cita el identificador en psql; el nombre no se interpola en el SQL.
+  "${COMPOSE[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet \
+    -U "${DB_USER}" -d postgres -v db="${db}" <<< 'CREATE DATABASE :"db";'
+
+  if psql_in "${db}" -f /docker-entrypoint-initdb.d/01-init.sql > /dev/null \
+    && "${COMPOSE[@]}" exec -T -e POSTGRES_DB="${db}" postgres \
+      bash /docker-entrypoint-initdb.d/02-bootstrap.sh; then
+    return 0
+  fi
+
+  echo "Fallo el bootstrap de ${db}: se borra la base recien creada." >&2
+  "${COMPOSE[@]}" exec -T postgres psql -X --quiet -U "${DB_USER}" -d postgres \
+    -v db="${db}" <<< 'DROP DATABASE IF EXISTS :"db";' || true
+  return 1
+}
 
 database_exists() {
   local db="$1"
@@ -150,9 +180,15 @@ migrate_database "${DB_NAME}"
 # El baseline es una decision sobre UNA base concreta: nunca se extiende a la E2E.
 if ! ${BASELINE} && [[ -n "${E2E_DB_NAME}" && "${E2E_DB_NAME}" != "${DB_NAME}" ]]; then
   if ! database_exists "${E2E_DB_NAME}"; then
-    echo "-- ${E2E_DB_NAME} (E2E_DB_NAME) no existe en el contenedor: se omite (crear con npm run test:bootstrap --prefix backend)"
+    bootstrap_e2e_database "${E2E_DB_NAME}"
+    migrate_database "${E2E_DB_NAME}"
   elif [[ "$(psql_in "${E2E_DB_NAME}" -tAc "SELECT to_regclass('public.schema_migrations') IS NOT NULL")" != "t" ]]; then
-    echo "-- ${E2E_DB_NAME} (E2E_DB_NAME) no tiene schema_migrations: se omite (recreala con npm run test:bootstrap --prefix backend)"
+    cat <<MSG
+-- ${E2E_DB_NAME} (E2E_DB_NAME) existe pero no tiene schema_migrations: se omite.
+   Es una base de pruebas: borrala y este script la recreara al dia:
+     docker compose --env-file backend/.env exec postgres dropdb -U ${DB_USER} ${E2E_DB_NAME}
+     scripts/migrate-linux.sh
+MSG
   else
     migrate_database "${E2E_DB_NAME}"
   fi

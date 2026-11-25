@@ -40,7 +40,8 @@ Comandos del día a día: [`docs/commands.md`](commands.md). Dependencias y audi
     - [3.5.1 Instalación manual de WSL 2 (GitHub Releases)](#351-instalación-manual-de-wsl-2-github-releases)
     - [3.5.2 Acceso HTTP local y «Modo solo HTTPS»](#352-acceso-http-local-y-modo-solo-https)
     - [3.5.3 Puertos de PostgreSQL: interno frente a anfitrión](#353-puertos-de-postgresql-interno-frente-a-anfitrión)
-- [4. Verificación del entorno](#4-verificación-del-entorno)
+- [4. Pruebas automatizadas en Docker](#4-pruebas-automatizadas-en-docker)
+- [5. Verificación del entorno](#5-verificación-del-entorno)
 
 ---
 
@@ -52,7 +53,8 @@ Comandos del día a día: [`docs/commands.md`](commands.md). Dependencias y audi
 | Frontend en desarrollo (`quasar dev`) | — (anfitrión) | `9000` | — | `localhost` | Modo desarrollo; usa `frontend/.env` |
 | Backend NestJS | `protodo_backend` | `PORT` | `PORT` | `127.0.0.1` | Perfil `app`. API en `/api`, Swagger en `/api/docs` |
 | PostgreSQL 16 | `protodo_postgres` | `POSTGRES_HOST_PORT` | `DB_PORT` (`PGPORT`) | todas las interfaces | Siempre (con y sin perfil). Volumen `pgdata_protodo` |
-| Redis 7 | `protodo_redis` | `REDIS_PORT` | `REDIS_PORT` | `127.0.0.1` | Perfil `app`. Provisionado para BullMQ; hoy el backend no lo consume |
+| Redis 7 | `protodo_redis` | `REDIS_PORT` | `REDIS_PORT` | `127.0.0.1` | Perfiles `app` y `test`. Provisionado para BullMQ; hoy el backend no lo consume |
+| Pruebas Jest (`backend-test`) | efímero (`run --rm`) | — | — | — | Perfil `test`. Etapa `test` de `backend/Dockerfile`, con devDependencies (§4) |
 | Portal Drupal (externo o local) | — (fuera de este repo) | `80` / `443` | — | según el servidor | Apache o Nginx propios (§2.3). El backend lo llama vía `DRUPAL_API_BASE_URL` |
 
 Todos los nombres en mayúsculas son variables de `backend/.env`. Con los valores de
@@ -108,7 +110,7 @@ entorno:
 | `ALLOWED_IP_RANGES` | No | Perímetro (PROT-05). El compose le añade la subred de `protodo_net` (§1.4) |
 | `BOOTSTRAP_ADMIN_EMAIL` | Sí | ADMIN que siembra `02-bootstrap.sh` en un volumen nuevo (y `scripts/bootstrap-db.sh`) |
 | `ACCEPTED_EMAIL_DOMAINS` | No | Dominios de login; también se inyecta en el build del frontend |
-| `E2E_DB_NAME` | No | Si existe en el contenedor, los `migrate-*` la migran también |
+| `E2E_DB_NAME` | No | Base de las pruebas e2e. Si tiene valor, `setup-*` / `migrate-*` la **crean** dentro del contenedor cuando falta y la migran junto a `DB_NAME`. Obligatoria para `test-* e2e` / `all` |
 
 **Puertos publicados en el anfitrión** (solo los usa Docker):
 
@@ -368,6 +370,12 @@ scripts/migrate-linux.sh --baseline   # adopta UNA vez una base que ya está al 
 - **Base existente con `schema_migrations`:** aplica solo las que falten, en orden, deteniéndose en
   el primer fallo.
 - **Base existente sin `schema_migrations`:** el script se detiene y pide `--baseline`.
+- **Base E2E (`E2E_DB_NAME`):** si no existe, se crea dentro del contenedor igual que un volumen
+  nuevo —`CREATE DATABASE`, `init.sql` y `02-bootstrap.sh` (baseline, ADMIN, semilla `069`)— y
+  después se migra. Es lo mismo que hace `npm run test:bootstrap`, sin Node ni `psql` en el
+  anfitrión. Si el bootstrap falla, la base recién creada se borra para no dejarla a medias. Si ya
+  existe pero no tiene `schema_migrations`, se omite y el script indica cómo recrearla (`dropdb`).
+  `--baseline` nunca la toca.
 - **Por qué no se ejecutan las 69 en cada arranque:** `init.sql` es el acumulado final y la historia
   no se puede encadenar sobre él (la `002`, `005` y `009` no aplican; la `035`–`038` están rotas).
   Detalle en [`commands.md` §3.1.2](commands.md#312-crear-una-base-desde-cero).
@@ -495,6 +503,7 @@ además:
 | `required variable X is missing a value` / «Faltan variables obligatorias» | `backend\.env` anterior a la centralización (§1.2) | Copia las que falten de `backend\.env.example` y dales valor |
 | `migrate-windows.bat` intenta aplicar desde la `001` y falla en la `005` | Versión antigua del script: comparaba con `findstr /x` sobre la salida LF de `psql` y no detectaba ninguna aplicada | Actualiza el repositorio; el script actual normaliza la lista a CRLF y muestra «N migraciones ya registradas» |
 | `password authentication failed` tras cambiar `DB_PASSWORD` | El volumen guardó las credenciales del primer arranque | Restaura las credenciales antiguas, o recrea el volumen (**borra los datos**): `docker compose --env-file backend\.env down -v` |
+| `E2E_DB_NAME ... existe pero no tiene schema_migrations` | Base de pruebas creada a mano o por una versión anterior | `docker compose --env-file backend\.env exec postgres dropdb -U <DB_USER> <E2E_DB_NAME>` y vuelve a lanzar `scripts\migrate-windows.bat` |
 | `/usr/bin/env: 'bash\r': No such file or directory` en un contenedor | Un `.sh` con CRLF (clon anterior a `.gitattributes`) | Renormaliza (§3.1, paso 4) y `docker compose ... up -d --build` |
 | El panel responde 403 en todas las llamadas | La IP que ve el backend no está en el perímetro | Revisa `docker compose ... logs backend` y §1.4 |
 
@@ -555,7 +564,49 @@ Usa `127.0.0.1` y no `localhost` en los clientes de Windows: `localhost` puede r
 
 ---
 
-## 4. Verificación del entorno
+## 4. Pruebas automatizadas en Docker
+
+Para equipos sin Node.js ni PostgreSQL en el anfitrión. Con Node.js instalado, `npm test` y
+`npm run test:e2e` desde `backend/` siguen siendo la vía rápida ([`commands.md` §4.3](commands.md#43-pruebas-jest-patrón-aaa)).
+
+```bash
+scripts/test-linux.sh            # all: unitarias y después e2e
+scripts/test-linux.sh unit       # npm test          (src/**/*.spec.ts, con dobles de prueba)
+scripts/test-linux.sh e2e        # npm run test:e2e  (test/**/*.e2e-spec.ts, AppModule real)
+```
+
+```bat
+scripts\test-windows.bat
+scripts\test-windows.bat unit
+scripts\test-windows.bat e2e --no-pause
+```
+
+Los dos runners:
+
+1. Validan `backend/.env` (§1.2). Para `e2e` y `all` exigen además `E2E_DB_NAME`, distinta de
+   `DB_NAME`.
+2. Levantan `postgres` y `redis` (`up -d --wait`).
+3. Ejecutan `migrate-*`, que deja al día `DB_NAME` y crea o migra `E2E_DB_NAME` (§2.5).
+4. Reconstruyen `backend-test` (el código va copiado en la imagen, no montado) y lanzan la suite con
+   `docker compose --env-file backend/.env --profile test run --rm backend-test …`. El código de
+   salida es el de Jest.
+
+No hay suite `integration`: las pruebas con base de datos real son las `e2e`. Un argumento
+desconocido termina con código `2` sin tocar Docker.
+
+**Qué lleva el contenedor `backend-test`:**
+
+- La etapa `test` de `backend/Dockerfile` (`FROM deps`): código completo y devDependencies. No
+  cambia la imagen `runtime` del servicio `backend`.
+- `env_file: backend/.env`, con `NODE_ENV=test`, `DB_HOST=postgres` y `REDIS_HOST=redis`.
+- **Guarda de la base:** `DB_NAME` se sobrescribe con `E2E_DB_NAME`, y `backend/.env` se monta en
+  `/app/.env` (solo lectura) para que `test/helpers/e2e-database.guard.ts` compare con la base de
+  desarrollo exactamente igual que en el anfitrión. Si `E2E_DB_NAME` está vacía o coincide con
+  `DB_NAME`, las e2e abortan antes de conectar.
+- Montajes de solo lectura de lo que las suites leen fuera de `backend/`: `db/migrations` (en
+  `/db/migrations`) y `scripts/with-test-env.sh` (en `/scripts/`).
+
+## 5. Verificación del entorno
 
 ```bash
 docker compose --env-file backend/.env --profile app config --quiet   # backend/.env completo

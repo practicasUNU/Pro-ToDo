@@ -23,7 +23,19 @@ FROM deps AS build
 COPY . .
 RUN npm run build
 
-# 3) Runtime: solo dependencias de produccion + Chromium
+# 3) Pruebas (servicio efimero `backend-test`, perfil `test` de docker-compose.yml).
+# Parte de `deps`, asi que conserva las devDependencies (jest, ts-jest,
+# supertest, @nestjs/testing, typescript, @nestjs/cli) que el runtime descarta.
+# No es la ultima etapa: `docker build` sin `--target` sigue produciendo el
+# runtime, y esta etapa no le anade ni un byte.
+# Las suites leen archivos de fuera de `backend/` (`db/migrations`,
+# `scripts/with-test-env.sh`) y el `.env`; no entran en este contexto de build y
+# los monta docker-compose.yml en runtime.
+FROM deps AS test
+COPY . .
+CMD ["npm", "test"]
+
+# 4) Runtime: solo dependencias de produccion + Chromium
 FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

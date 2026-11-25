@@ -9594,3 +9594,13 @@ mapeador.
 - **Por que `npm ci --ignore-scripts` en el frontend:** el `postinstall` (`quasar prepare`) necesita `src/` e `index.html`; se ejecuta a mano tras `COPY . .`. Los otros install scripts del lock (`@parcel/watcher`, `fsevents`) no intervienen en el build.
 - **Por que WSL desde GitHub Releases:** `wsl --install`/`--update` descargan el `.msi` a la carpeta del usuario; con tildes o espacios en la ruta fallan con "Error catastrofico" o abren la ayuda de `msiexec`. Instalar el `.msi` desde `C:\wsl.msi` evita la ruta problematica.
 - [ ] Prueba real en Windows 11 y del perfil `app` en Linux (ver PLAN)
+
+## BD de pruebas E2E y runner de Jest en Docker
+
+- **Por que la base E2E se crea con `init.sql` + `02-bootstrap.sh` y no aplicando las migraciones:** sobre una base vacia la historia no se encadena (la 005 actualiza `tipos_nodo`, sustituida por `nodos`; la 009 no lleva `IF NOT EXISTS`; la 002 promueve un usuario inexistente; 035-038 rotas). Es el mismo camino que `test:bootstrap` y que un volumen nuevo, y `02-bootstrap.sh` se reutiliza tal cual cambiando `POSTGRES_DB` con `exec -e`.
+- **Por que se borra la base si el bootstrap falla:** una base creada sin `schema_migrations` haria que la siguiente ejecucion la saltara para siempre. Solo se borra la que acaba de crear esa misma ejecucion.
+- **Por que `backend-test` monta `backend/.env` y sobrescribe `DB_NAME`:** el `.env` no entra en la imagen. Sin el archivo, `resolveTestDatabase` veria el `DB_NAME` de desarrollo (llegado por `env_file`) como override explicito y las e2e —que montan el `AppModule` real y borran filas— correrian contra desarrollo. Con `DB_NAME=${E2E_DB_NAME:-}` y el archivo montado, una `E2E_DB_NAME` vacia o igual a `DB_NAME` aborta antes de conectar.
+- **Por que se montan `db/migrations` y `scripts/with-test-env.sh` en `/`:** `prompt-migrations.helper.ts` y `test-database-env.e2e-spec.ts` resuelven rutas de la raiz del repo desde `backend/test/`; con `WORKDIR /app` esa raiz es `/`, y esos archivos no estan en el contexto de build `./backend`.
+- **Por que `integration` se rechaza:** solo existen dos configuraciones de Jest (`npm test` con `rootDir: src` y `test/jest-e2e.json`). Un alias haria creer que hay una tercera suite.
+- **Por que el runner reconstruye `backend-test` antes de `run`:** el codigo va copiado en la imagen; sin `build`, `run` ejecutaria una version anterior del codigo.
+- [ ] Prueba real en Docker (ver PLAN)

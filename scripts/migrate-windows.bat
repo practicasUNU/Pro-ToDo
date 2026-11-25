@@ -17,8 +17,15 @@ REM sola vez y solo si la base ya esta al dia.
 REM
 REM Configuracion: solo backend\.env (scripts\lib\env.bat), sin valores por
 REM defecto. psql dentro del contenedor usa el puerto interno (PGPORT = DB_PORT),
-REM por eso no lleva -p. Si E2E_DB_NAME esta definida y esa base existe, se
-REM migra tambien.
+REM por eso no lleva -p.
+REM
+REM BASE E2E. Si E2E_DB_NAME tiene valor (y es distinta de DB_NAME), tambien se
+REM atiende, sin npm ni psql en el anfitrion:
+REM   - No existe: se CREA como un volumen nuevo (init.sql + 02-bootstrap.sh:
+REM     baseline, ADMIN, semilla 069) y despues se migra. NO se le aplican las
+REM     69 migraciones desde cero: la historia no se puede encadenar.
+REM   - Existe con schema_migrations: se migra como DB_NAME.
+REM   - Existe sin schema_migrations: se omite y se indica como recrearla.
 REM
 REM Uso:  scripts\migrate-windows.bat [--baseline] [--no-pause]
 REM
@@ -39,6 +46,7 @@ set "TEMP_PREFIX=%TEMP%\protodo-migrate-%RANDOM%%RANDOM%"
 set "QUERY_FILE=%TEMP_PREFIX%-query.txt"
 set "APPLIED_RAW=%TEMP_PREFIX%-applied-raw.txt"
 set "APPLIED_FILE=%TEMP_PREFIX%-applied.txt"
+set "SQL_FILE=%TEMP_PREFIX%-stmt.sql"
 
 :parse_args
 if "%~1"=="" goto :args_done
@@ -89,7 +97,7 @@ if /i "%E2E_DB_NAME%"=="%DB_NAME%" goto :end
 
 call :query postgres "SELECT 1 FROM pg_database WHERE datname = '%E2E_DB_NAME%'"
 if errorlevel 1 goto :failed
-if not "%QUERY_RESULT%"=="1" goto :e2e_missing
+if not "%QUERY_RESULT%"=="1" goto :e2e_create
 
 call :query "%E2E_DB_NAME%" "SELECT to_regclass('public.schema_migrations') IS NOT NULL"
 if errorlevel 1 goto :failed
@@ -99,19 +107,51 @@ call :migrate_database "%E2E_DB_NAME%"
 if errorlevel 1 goto :failed
 goto :end
 
-:e2e_missing
-echo -- %E2E_DB_NAME% - E2E_DB_NAME - no existe en el contenedor: se omite.
-echo    Se crea con: npm run test:bootstrap --prefix backend
+:e2e_create
+call :bootstrap_e2e_database "%E2E_DB_NAME%"
+if errorlevel 1 goto :failed
+call :migrate_database "%E2E_DB_NAME%"
+if errorlevel 1 goto :failed
 goto :end
 
 :e2e_untracked
-echo -- %E2E_DB_NAME% - E2E_DB_NAME - no tiene schema_migrations: se omite.
-echo    Recreala con: npm run test:bootstrap --prefix backend
+echo -- %E2E_DB_NAME% - E2E_DB_NAME - existe pero no tiene schema_migrations: se omite.
+echo    Es una base de pruebas: borrala y este script la recreara al dia:
+echo      docker compose --env-file backend\.env exec postgres dropdb -U %DB_USER% %E2E_DB_NAME%
+echo      scripts\migrate-windows.bat
 goto :end
 
 :failed
 set "EXIT_CODE=1"
 goto :end
+
+REM ===========================================================================
+REM :bootstrap_e2e_database <base>. Crea la base como un volumen nuevo. Si algo
+REM falla, borra la base RECIEN creada - y solo esa - para no dejar una a medias
+REM que la siguiente ejecucion saltaria por no tener schema_migrations.
+REM ===========================================================================
+:bootstrap_e2e_database
+set "NEW_DB=%~1"
+echo == Creando %NEW_DB% - E2E_DB_NAME: init.sql + bootstrap
+REM El SQL va por un archivo: `:"db"` cita el identificador en psql y evita
+REM pelear con las comillas de cmd.exe dentro de -c.
+> "%SQL_FILE%" echo CREATE DATABASE :"db";
+%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d postgres -v "db=%NEW_DB%" < "%SQL_FILE%"
+if errorlevel 1 exit /b 1
+
+%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%NEW_DB%" -f /docker-entrypoint-initdb.d/01-init.sql >nul
+if errorlevel 1 goto :bootstrap_e2e_failed
+%COMPOSE% exec -T -e "POSTGRES_DB=%NEW_DB%" postgres bash /docker-entrypoint-initdb.d/02-bootstrap.sh
+if errorlevel 1 goto :bootstrap_e2e_failed
+del "%SQL_FILE%" >nul 2>&1
+exit /b 0
+
+:bootstrap_e2e_failed
+echo Fallo el bootstrap de %NEW_DB%: se borra la base recien creada.
+> "%SQL_FILE%" echo DROP DATABASE IF EXISTS :"db";
+%COMPOSE% exec -T postgres psql -X --quiet -U "%DB_USER%" -d postgres -v "db=%NEW_DB%" < "%SQL_FILE%"
+del "%SQL_FILE%" >nul 2>&1
+exit /b 1
 
 REM ===========================================================================
 REM :migrate_database <base>
@@ -237,6 +277,7 @@ goto :eof
 
 :end
 del "%QUERY_FILE%" >nul 2>&1
+del "%SQL_FILE%" >nul 2>&1
 del "%APPLIED_RAW%" >nul 2>&1
 del "%APPLIED_FILE%" >nul 2>&1
 if defined PROTODO_NO_PAUSE goto :exit
