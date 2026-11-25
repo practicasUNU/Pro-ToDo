@@ -9612,3 +9612,10 @@ mapeador.
 - **Por que `additional_contexts` en vez de montajes:** un montaje `:ro` no se puede normalizar. Copiar `db/migrations` y `with-test-env.sh` en la imagen permite pasarles `sed` y las rutas finales (`/db/migrations`, `/scripts/`) no cambian para los specs.
 - **Por que Chromium en la etapa `test` y no en `deps`:** `deps` alimenta tambien `build`; meter alli Chromium y sus librerias engordaria esa etapa sin necesidad. En `test`, antes del `COPY . .`, la capa se reutiliza de la cache entre cambios de codigo.
 - **Por que los `.bat` quedan `i/lf w/crlf` y no `i/crlf`:** con `text eol=crlf` Git normaliza a LF en el indice y convierte al hacer checkout; `i/crlf` exigiria desactivar la normalizacion (`-text`).
+
+## Test 1.1 del extractor PDF estable (CRLF y cache fria de Jest)
+
+- **Por que el encargo hablaba de un template literal:** el test no construye el PDF; lee el fixture versionado. El sintoma (offsets de `xref` rotos) era real, pero venia del fixture convertido a CRLF por `autocrlf`, no del `.ts`.
+- **Por que restaurar y avisar en vez de solo fallar:** el fixture original no tiene ningun `\r`, asi que `\r\n` -> `\n` lo devuelve byte a byte (lo comprueba el `1.1.1`); el `console.warn` evita que la corrupcion del checkout pase desapercibida.
+- **Por que tocar codigo de produccion:** al investigar aparecio una segunda causa independiente: con LF y en Linux, el `1.1` fallaba siempre en la primera ejecucion con la cache de Jest fria. Aislado: `pdf-parse` (fake worker de pdf.js, que clona con `new value.constructor(...)`) devuelve `bad XRef entry` con un `Buffer` bajo Jest y funciona con un `Uint8Array`. Una imagen `backend-test` nueva siempre arranca en frio, asi que ningun cambio solo en el test lo arreglaba. La vista `Uint8Array` no copia memoria y no cambia el comportamiento fuera de Jest.
+- **Por que una anotacion y no un `as unknown as`:** `@types/pdf-parse` declara solo `Buffer`; el proyecto no activa `strictFunctionTypes`, de modo que la firma real se declara anotando la constante y ESLint (`no-unnecessary-type-assertion`) queda limpio.

@@ -225,6 +225,36 @@ export const EXTRACTABLE_DOCUMENT_EXTENSIONS: readonly string[] = [
  * `RawEmailAttachment.filename`): aqui solo se compara el sufijo contra un mapa
  * cerrado. PROHIBIDO derivar de el una ruta de fichero.
  */
+/**
+ * `pdf-parse` admite cualquier `Uint8Array` (pdf.js `getDocument`), pero
+ * `@types/pdf-parse` solo declara `Buffer`. Esta anotacion declara la firma
+ * real; el compilador la acepta porque el proyecto no activa
+ * `strictFunctionTypes`, asi que no hace falta ninguna asercion.
+ */
+const parsePdfBytes: (data: Uint8Array) => ReturnType<typeof pdfParse> =
+  pdfParse;
+
+/**
+ * Entrega a `pdf-parse` una vista `Uint8Array` plana del mismo buffer, no el
+ * `Buffer` de Node.
+ *
+ * POR QUE. `pdf-parse` ejecuta pdf.js con un "fake worker" que clona los datos
+ * con `new value.constructor(...)`. Con un `Buffer`, ese constructor es el
+ * `new Buffer(...)` obsoleto, y bajo el entorno de Jest devuelve bytes que no
+ * cuadran con la tabla `xref`: el PDF se rechaza con `bad XRef entry` y el texto
+ * sale vacio. Pasaba siempre en la primera ejecucion con la cache de Jest fria
+ * (toda imagen `backend-test` recien construida) y no en las siguientes. Con un
+ * `Uint8Array` el clon usa el constructor nativo y el resultado es estable. En
+ * Node sin Jest el comportamiento es el mismo que antes.
+ *
+ * Es una vista, no una copia: comparte memoria y respeta `byteOffset` (los
+ * buffers pequenos de Node viven dentro de un bloque compartido).
+ */
+const parsePdf = (buffer: Buffer): ReturnType<typeof pdfParse> =>
+  parsePdfBytes(
+    new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+  );
+
 const extensionOf = (filename: string): string => {
   const dot = filename.lastIndexOf('.');
 
@@ -615,7 +645,7 @@ const extractRawText = async (
       return { text: extractFromDelimited(buffer), label: null, notices: [] };
 
     case 'pdf':
-      return { text: (await pdfParse(buffer)).text, label: null, notices: [] };
+      return { text: (await parsePdf(buffer)).text, label: null, notices: [] };
 
     case 'docx':
       return { text: await extractFromDocx(buffer), label: null, notices: [] };

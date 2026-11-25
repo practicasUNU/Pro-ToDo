@@ -5438,3 +5438,11 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - **`docker-compose.yml`:** `backend-test` con `additional_contexts` (`migrations`, `repo-scripts`); solo monta `backend/.env`.
 - [x] Guarda de `02-bootstrap.sh` con `BOOTSTRAP_ADMIN_EMAIL=""` (exit 1, comando de recreacion, sin `@`); simulacion CRLF -> `tr -d` en el anfitrion; `config --quiet` con perfiles `app` y `test`
 - [ ] `build backend-test` + `e2e` de `test-database-env`, `pipeline-seeds-integrity` y `telemetry` en Docker (pendiente de ejecucion con acceso al socket)
+
+## Test 1.1 del extractor PDF estable (CRLF y cache fria de Jest)
+
+- **Causa 1 (Windows):** `nota-nativa.pdf` no tiene bytes NUL; en un clon anterior a `*.pdf binary`, `core.autocrlf` lo paso a CRLF y desplazo los offsets de `xref`. El spec lee el fixture con `readNativePdfFixture()`, que restaura `\r\n` -> `\n` (exacto: el original no tiene ningun CR) y avisa con `console.warn`.
+- **Causa 2 (Docker / cache fria):** bajo Jest, `pdf-parse` rechazaba un `Buffer` de Node (`bad XRef entry`) en la primera ejecucion tras `--clearCache`; con un `Uint8Array` es estable. `document-extractor.util.ts` pasa ahora una vista `Uint8Array` (sin copia) via `parsePdf`.
+- **`.gitattributes`:** `eol=lf` tambien para `*.ts`, `*.js`, `*.mjs`, `*.cjs`, `*.vue`, `*.json`, `*.md`, `*.scss`, `*.css`; renormalizacion sin cambios en el indice.
+- [x] Spec en frio (`--clearCache` + `--no-cache`) 3/3 en verde (antes 0/3); suite unitaria completa en frio; `tsc` y ESLint
+- [ ] Confirmar en una imagen `backend-test` recien construida desde Windows
