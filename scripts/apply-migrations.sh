@@ -70,8 +70,9 @@ fi
 [[ -n "${_ENV_DB_PASSWORD}" ]] && DB_PASSWORD="${_ENV_DB_PASSWORD}"
 : # el ultimo `[[ ]]` puede devolver 1 y `set -e` abortaria
 
-DB_HOST="${DB_HOST:-localhost}"
-DB_PORT="${DB_PORT:-5433}"
+# Sin valores por defecto: todo sale de `backend/.env` (o del entorno).
+DB_HOST="${DB_HOST:?Falta DB_HOST: declaralo en backend/.env o en el entorno}"
+DB_PORT="${DB_PORT:?Falta DB_PORT: declaralo en backend/.env o en el entorno}"
 DB_NAME="${DB_NAME:?Falta DB_NAME: declaralo en backend/.env o en el entorno}"
 DB_USER="${DB_USER:?Falta DB_USER: declaralo en backend/.env o en el entorno}"
 

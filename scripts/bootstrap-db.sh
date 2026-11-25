@@ -52,12 +52,12 @@ fi
 
 TARGET_DB="${1:-${DB_NAME:?Falta DB_NAME o un nombre como primer argumento}}"
 
-# Correo del administrador inicial. Se puede cambiar por entorno porque no hay
-# ninguno versionado a proposito: la autenticacion es por OTP, asi que la cuenta
-# tiene que existir en un buzon al que alguien tenga acceso real.
-BOOTSTRAP_ADMIN_EMAIL="${BOOTSTRAP_ADMIN_EMAIL:-practicas@unuware.com}"
-DB_HOST="${DB_HOST:-localhost}"
-DB_PORT="${DB_PORT:-5433}"
+# Correo del administrador inicial. Obligatorio y sin valor por defecto
+# versionado: la autenticacion es por OTP, asi que la cuenta tiene que existir en
+# un buzon al que alguien tenga acceso real, y ese dato vive en `backend/.env`.
+BOOTSTRAP_ADMIN_EMAIL="${BOOTSTRAP_ADMIN_EMAIL:?Falta BOOTSTRAP_ADMIN_EMAIL: declaralo en backend/.env o en el entorno}"
+DB_HOST="${DB_HOST:?Falta DB_HOST: declaralo en backend/.env o en el entorno}"
+DB_PORT="${DB_PORT:?Falta DB_PORT: declaralo en backend/.env o en el entorno}"
 DB_USER="${DB_USER:?Falta DB_USER}"
 
 export PGPASSWORD="${DB_PASSWORD:-}"

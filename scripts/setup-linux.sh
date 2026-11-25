@@ -28,6 +28,9 @@ ENV_TEMPLATE="${REPO_ROOT}/backend/.env.example"
 
 cd "${REPO_ROOT}"
 
+# shellcheck source=scripts/lib/env.sh
+source "${REPO_ROOT}/scripts/lib/env.sh"
+
 echo "== [1/5] Docker Engine"
 if ! command -v docker > /dev/null 2>&1; then
   cat >&2 <<'MSG'
@@ -73,12 +76,14 @@ MSG
 fi
 [[ -e "${REPO_ROOT}/.env" ]] || ln -s backend/.env "${REPO_ROOT}/.env"
 
+# Sin valores por defecto: aborta listando lo que falte (backend/.env.example).
+load_env_or_die "${ENV_FILE}" "${REQUIRED_ENV_VARS[@]}"
+
 echo "== [4/5] Contenedores (perfil app)"
 docker compose --env-file "${ENV_FILE}" --profile app up -d --build
 
 echo "== [5/5] Migraciones"
 "${REPO_ROOT}/scripts/migrate-linux.sh"
 
-# `|| true`: sin la variable, grep devuelve 1 y `pipefail` + `set -e` abortarian.
-FRONTEND_PORT="$( (grep -E '^FRONTEND_PORT=' "${ENV_FILE}" || true) | tail -n 1 | cut -d= -f2- | tr -d '"'"'"'\r')"
-echo "== Listo. Panel: http://localhost:${FRONTEND_PORT:-8080}"
+# HTTP plano: con el "modo solo HTTPS" del navegador hay que escribir `http://`.
+echo "== Listo. Panel: http://localhost:${FRONTEND_PORT}"

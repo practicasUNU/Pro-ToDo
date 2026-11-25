@@ -4,9 +4,10 @@ REM Aplica las migraciones pendientes de db\migrations\ DENTRO del contenedor
 REM postgres (docker compose exec), sin psql en el anfitrion ni Git Bash.
 REM
 REM Misma semantica que scripts/migrate-linux.sh y scripts/apply-migrations.sh:
-REM la tabla schema_migrations guarda cada archivo ya aplicado; solo se ejecuta
-REM lo que falta, en orden ascendente, y se corta en el primer fallo. NO se
-REM reaplica toda la historia: init.sql es el acumulado final y no se puede
+REM la tabla schema_migrations guarda cada archivo ya aplicado (su nombre, p. ej.
+REM 005-tipos-nodo-fsm.sql, igual que db\docker-init\02-bootstrap.sh); solo se
+REM ejecuta lo que falta, en orden ascendente, y se corta en el primer fallo. NO
+REM se reaplica toda la historia: init.sql es el acumulado final y no se puede
 REM encadenar con ella (docs\commands.md, seccion 3.1.2).
 REM
 REM Un volumen nuevo ya nace con schema_migrations en baseline
@@ -14,12 +15,16 @@ REM (db\docker-init\02-bootstrap.sh). Una base anterior no la tiene: el script
 REM se detiene y pide --baseline, que las registra SIN ejecutarlas. Usalo una
 REM sola vez y solo si la base ya esta al dia.
 REM
-REM Si E2E_DB_NAME esta definida y esa base existe, se migra tambien.
+REM Configuracion: solo backend\.env (scripts\lib\env.bat), sin valores por
+REM defecto. psql dentro del contenedor usa el puerto interno (PGPORT = DB_PORT),
+REM por eso no lleva -p. Si E2E_DB_NAME esta definida y esa base existe, se
+REM migra tambien.
 REM
 REM Uso:  scripts\migrate-windows.bat [--baseline] [--no-pause]
 REM
 REM Las consultas a psql se vuelcan a un archivo temporal y se leen con
-REM `set /p`: evita los problemas de comillas y parentesis de `for /f` con SQL.
+REM `set /p` o `for /f`: evita los problemas de comillas y parentesis de
+REM `for /f` con SQL en linea.
 REM ===========================================================================
 setlocal EnableExtensions DisableDelayedExpansion
 
@@ -30,8 +35,10 @@ set "MIGRATIONS_DIR=db\migrations"
 set "MAX_WAIT_ATTEMPTS=30"
 set "BASELINE=0"
 set "EXIT_CODE=0"
-set "QUERY_FILE=%TEMP%\protodo-migrate-%RANDOM%-query.txt"
-set "APPLIED_FILE=%TEMP%\protodo-migrate-%RANDOM%-applied.txt"
+set "TEMP_PREFIX=%TEMP%\protodo-migrate-%RANDOM%%RANDOM%"
+set "QUERY_FILE=%TEMP_PREFIX%-query.txt"
+set "APPLIED_RAW=%TEMP_PREFIX%-applied-raw.txt"
+set "APPLIED_FILE=%TEMP_PREFIX%-applied.txt"
 
 :parse_args
 if "%~1"=="" goto :args_done
@@ -41,30 +48,14 @@ shift /1
 goto :parse_args
 :args_done
 
-REM --- Lectura de backend\.env (el entorno manda sobre el archivo) ----------
-REM Solo se miran las claves que interesan; el valor (%%B) no se reinterpreta,
-REM asi que los secretos con caracteres especiales de otras lineas no molestan.
-set "FILE_DB_USER="
-set "FILE_DB_NAME="
-set "FILE_E2E_DB_NAME="
-if not exist "%ENV_FILE%" goto :env_read
-for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ENV_FILE%") do (
-  if /i "%%A"=="DB_USER" set "FILE_DB_USER=%%B"
-  if /i "%%A"=="DB_NAME" set "FILE_DB_NAME=%%B"
-  if /i "%%A"=="E2E_DB_NAME" set "FILE_E2E_DB_NAME=%%B"
-)
-:env_read
-if defined FILE_DB_USER set "FILE_DB_USER=%FILE_DB_USER:"=%"
-if defined FILE_DB_NAME set "FILE_DB_NAME=%FILE_DB_NAME:"=%"
-if defined FILE_E2E_DB_NAME set "FILE_E2E_DB_NAME=%FILE_E2E_DB_NAME:"=%"
-if not defined DB_USER set "DB_USER=%FILE_DB_USER%"
-if not defined DB_NAME set "DB_NAME=%FILE_DB_NAME%"
-if not defined E2E_DB_NAME set "E2E_DB_NAME=%FILE_E2E_DB_NAME%"
-if not defined DB_USER set "DB_USER=postgres"
-if not defined DB_NAME set "DB_NAME=protodo"
+REM --- Configuracion desde backend\.env (el entorno manda sobre el archivo) --
+call "%~dp0lib\env.bat" "%ENV_FILE%"
+if errorlevel 1 goto :failed
+REM Opcional por contrato: sin ella simplemente no se migra la base E2E.
+call "%~dp0lib\env.bat" "%ENV_FILE%" --optional E2E_DB_NAME
 
-set "COMPOSE=docker compose"
-if exist "%ENV_FILE%" set "COMPOSE=docker compose --env-file %ENV_FILE%"
+REM Siempre con --env-file: compose resuelve ${VAR:?} desde backend\.env.
+set "COMPOSE=docker compose --env-file %ENV_FILE%"
 
 REM --- Espera a que postgres pase pg_isready ---------------------------------
 echo == Esperando a PostgreSQL - pg_isready
@@ -129,6 +120,7 @@ REM ===========================================================================
 set "TARGET_DB=%~1"
 set /a APPLIED=0
 set /a SKIPPED=0
+set /a REGISTERED=0
 set "MIGRATION_FAILED="
 echo == Migraciones sobre %TARGET_DB%
 
@@ -146,12 +138,24 @@ echo y despues ejecuta el baseline.
 exit /b 1
 
 :table_present
-%COMPOSE% exec -T postgres psql -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" -c "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());" >nul
+%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" -c "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());" >nul
 if errorlevel 1 exit /b 1
 
-REM Una sola consulta con todas las versiones aplicadas, en vez de una por archivo.
-%COMPOSE% exec -T postgres psql -tA -U "%DB_USER%" -d "%TARGET_DB%" -c "SELECT version FROM schema_migrations" > "%APPLIED_FILE%"
+REM Una sola consulta con todas las versiones aplicadas, en vez de una por
+REM archivo. btrim por si alguna se registro con espacios o CR.
+%COMPOSE% exec -T postgres psql -X -q -tA -U "%DB_USER%" -d "%TARGET_DB%" -c "SELECT btrim(version, E' \t\r\n') FROM schema_migrations ORDER BY 1" > "%APPLIED_RAW%"
 if errorlevel 1 exit /b 1
+
+REM psql escribe las lineas con LF (Linux). `findstr /x` solo reconoce el final
+REM de linea con CRLF, de modo que sobre ese archivo NINGUNA version coincidia y
+REM se intentaba aplicar todo desde la 001 (fallaba en la 005). `for /f` lee
+REM las lineas con LF y `echo` las reescribe con CRLF: con ese archivo la
+REM comparacion exacta funciona.
+type nul > "%APPLIED_FILE%"
+for /f "usebackq delims=" %%V in ("%APPLIED_RAW%") do call :append_applied "%%V"
+del "%APPLIED_RAW%" >nul 2>&1
+echo -- %REGISTERED% migraciones ya registradas en schema_migrations
+if %REGISTERED% equ 0 if not "%BASELINE%"=="1" echo -- AVISO: schema_migrations esta vacia: se aplicara toda la historia.
 
 REM `dir /on`: orden ascendente por nombre (los prefijos NNN- van con ceros).
 for /f "delims=" %%F in ('dir /b /a-d /on "%MIGRATIONS_DIR%\*.sql"') do call :migrate_file "%%F"
@@ -164,12 +168,22 @@ if not "%BASELINE%"=="1" echo == %TARGET_DB%: %APPLIED% aplicadas, %SKIPPED% ya 
 exit /b 0
 
 REM ===========================================================================
+REM :append_applied <version>. Una linea CRLF por version, sin vacias.
+REM ===========================================================================
+:append_applied
+if "%~1"=="" goto :eof
+>> "%APPLIED_FILE%" echo(%~1
+set /a REGISTERED+=1
+goto :eof
+
+REM ===========================================================================
 REM :migrate_file <archivo.sql>. Tras el primer fallo no hace nada mas.
 REM ===========================================================================
 :migrate_file
 if defined MIGRATION_FAILED goto :eof
 set "VERSION=%~1"
 
+REM /x linea completa, /l literal, /c: cadena entera (no lista de palabras).
 findstr /x /l /c:"%VERSION%" "%APPLIED_FILE%" >nul 2>&1
 if errorlevel 1 goto :migrate_file_pending
 set /a SKIPPED+=1
@@ -178,7 +192,7 @@ goto :eof
 :migrate_file_pending
 if "%BASELINE%"=="1" goto :migrate_file_baseline
 echo -- aplicando %VERSION%
-%COMPOSE% exec -T postgres psql -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" < "%MIGRATIONS_DIR%\%VERSION%"
+%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" < "%MIGRATIONS_DIR%\%VERSION%"
 if errorlevel 1 goto :migrate_file_error
 goto :migrate_file_register
 
@@ -187,8 +201,9 @@ echo -- registrando sin ejecutar %VERSION%
 
 :migrate_file_register
 REM El registro va DESPUES: si la migracion falla no queda marcada y el
-REM siguiente intento la reintenta en vez de darla por buena.
-%COMPOSE% exec -T postgres psql -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" -c "INSERT INTO schema_migrations (version) VALUES ('%VERSION%') ON CONFLICT (version) DO NOTHING;" >nul
+REM siguiente intento la reintenta en vez de darla por buena. Mismo formato que
+REM 02-bootstrap.sh y migrate-linux.sh: el nombre del archivo, sin ruta.
+%COMPOSE% exec -T postgres psql -X -v ON_ERROR_STOP=1 --quiet -U "%DB_USER%" -d "%TARGET_DB%" -c "INSERT INTO schema_migrations (version) VALUES ('%VERSION%') ON CONFLICT (version) DO NOTHING;" >nul
 if errorlevel 1 goto :migrate_file_error
 set /a APPLIED+=1
 goto :eof
@@ -205,9 +220,10 @@ REM :query <base> "<sql>"  ->  QUERY_RESULT (primera linea, sin formato)
 REM ===========================================================================
 :query
 set "QUERY_RESULT="
-%COMPOSE% exec -T postgres psql -tA -U "%DB_USER%" -d "%~1" -c "%~2" > "%QUERY_FILE%"
+%COMPOSE% exec -T postgres psql -X -q -tA -U "%DB_USER%" -d "%~1" -c "%~2" > "%QUERY_FILE%"
 if errorlevel 1 exit /b 1
-set /p QUERY_RESULT=<"%QUERY_FILE%"
+REM `for /f` y no `set /p`: no arrastra el resto de la linea si llega con LF.
+for /f "usebackq delims=" %%R in ("%QUERY_FILE%") do if not defined QUERY_RESULT set "QUERY_RESULT=%%R"
 del "%QUERY_FILE%" >nul 2>&1
 exit /b 0
 
@@ -221,6 +237,7 @@ goto :eof
 
 :end
 del "%QUERY_FILE%" >nul 2>&1
+del "%APPLIED_RAW%" >nul 2>&1
 del "%APPLIED_FILE%" >nul 2>&1
 if defined PROTODO_NO_PAUSE goto :exit
 REM Pausa solo si la consola la abrio el propio .bat (doble clic: cmd.exe /c).

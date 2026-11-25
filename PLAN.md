@@ -5406,3 +5406,16 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] `docker compose config` (sin perfil y con `--profile app`), `bash -n` de los `.sh`, anclas de los indices validadas
 - [ ] Probar el stack completo (`scripts/setup-linux.sh`) con acceso al socket de Docker
 - [ ] Probar `setup-windows.bat` / `migrate-windows.bat` en un Windows 10/11 real
+
+## Configuracion centralizada en `backend/.env` y migraciones en Windows
+
+- **Contrato:** `backend/.env` es la unica fuente y `backend/.env.example` el contrato. `docker-compose.yml`, `db/docker-init/`, la plantilla de Nginx y `scripts/` no tienen valores por defecto. Obligatorias (`${VAR:?}` en compose y `REQUIRED_ENV_VARS` en `scripts/lib/env.{sh,bat}`): `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `POSTGRES_HOST_PORT`, `PORT`, `FRONTEND_PORT`, `FRONTEND_BIND_ADDRESS`, `REDIS_PORT`, `BOOTSTRAP_ADMIN_EMAIL` (+ `FRONTEND_URL` en los scripts). Opcionales: `ALLOWED_IP_RANGES`, `ACCEPTED_EMAIL_DOMAINS`, `E2E_DB_NAME`.
+- **Puertos:** postgres `POSTGRES_HOST_PORT:DB_PORT` con `PGPORT=DB_PORT` (interno); backend `127.0.0.1:PORT:PORT`; redis `127.0.0.1:REDIS_PORT:REDIS_PORT`; frontend `FRONTEND_BIND_ADDRESS:FRONTEND_PORT:80`. Desaparece `BACKEND_PORT` y las sobrescrituras de `PORT`/`DB_PORT`/`REDIS_PORT`/`FRONTEND_URL`.
+- **Nginx:** `frontend/nginx.conf.template` renderizada por el entrypoint oficial (`envsubst`, `NGINX_ENVSUBST_FILTER=^PORT$`) con upstream `backend:${PORT}`; `frontend/docker/10-require-env.sh` aborta si `PORT` falta o no es numerico.
+- **Builds:** `frontend/Dockerfile` con `npm ci --ignore-scripts` + `npx quasar prepare` tras `COPY . .`. `backend/Dockerfile` sin cambios de orden (no hay hooks que lean `src/`) y sin `EXPOSE` fijo.
+- **Windows:** `migrate-windows.bat` normaliza la lista de `schema_migrations` a CRLF antes de `findstr /x`; `setup-windows.bat` comprueba `wsl --status` antes de instalar/arrancar Docker Desktop y explica la instalacion manual del `.msi` de GitHub Releases.
+- **Scripts del anfitrion:** `apply-migrations.sh`, `bootstrap-db.sh` y `generate-doc-screenshots.js` sin `localhost`/`5433`/`5432`/correo por defecto.
+- [x] `docker compose --env-file backend/.env --profile app config --quiet`, prueba negativa sin `POSTGRES_HOST_PORT`, render de la plantilla con `envsubst`
+- [x] Auditoria `rg` de literales, terminadores LF/CRLF y formato `version` comun a las tres piezas
+- [ ] Probar el stack completo con acceso al socket de Docker
+- [ ] Probar `setup-windows.bat` / `migrate-windows.bat` en Windows 11 (debe mostrar "0 aplicadas, 69 ya estaban" sobre un volumen recien creado)

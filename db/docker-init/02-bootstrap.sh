@@ -12,7 +12,8 @@
 #      `init.sql` ya es el acumulado final y la historia no se puede encadenar
 #      sobre el (002/005/009 no aplican; 035-038 estan rotas): ver
 #      docs/commands.md §3.1.2.
-#   2. Siembra como ADMIN la cuenta de `BOOTSTRAP_ADMIN_EMAIL`, si esta definida.
+#   2. Siembra como ADMIN la cuenta de `BOOTSTRAP_ADMIN_EMAIL` (obligatoria: sale
+#      de `backend/.env` y docker-compose.yml ya se niega a arrancar sin ella).
 #   3. Aplica las semillas de contenido (`SEED_MIGRATIONS`, hoy solo la 069, que
 #      ademas crea su propio ADMIN ancla).
 #
@@ -25,11 +26,15 @@
 (
   set -euo pipefail
 
+  # Segunda guarda tras el `${BOOTSTRAP_ADMIN_EMAIL:?}` de docker-compose.yml:
+  # sin correo no hay un ADMIN conocido con el que entrar al panel.
+  : "${BOOTSTRAP_ADMIN_EMAIL:?BOOTSTRAP_ADMIN_EMAIL vacio: definela en backend/.env}"
+
   MIGRATIONS_DIR="/migrations"
   SEED_MIGRATIONS=(069)
 
   psql_run() {
-    psql -v ON_ERROR_STOP=1 --quiet --no-password \
+    psql -X -v ON_ERROR_STOP=1 --quiet --no-password \
       --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" "$@"
   }
 
@@ -51,17 +56,13 @@ SQL
   done
   echo "-- ${registered} migracion(es) registradas sin ejecutar"
 
-  if [[ -n "${BOOTSTRAP_ADMIN_EMAIL:-}" ]]; then
-    echo "== [bootstrap] Cuenta ADMIN: ${BOOTSTRAP_ADMIN_EMAIL}"
-    # Variable de psql, no interpolacion en el SQL: el correo llega del `.env`.
-    psql_run -v email="${BOOTSTRAP_ADMIN_EMAIL}" > /dev/null <<'SQL'
+  echo "== [bootstrap] Cuenta ADMIN: ${BOOTSTRAP_ADMIN_EMAIL}"
+  # Variable de psql, no interpolacion en el SQL: el correo llega del `.env`.
+  psql_run -v email="${BOOTSTRAP_ADMIN_EMAIL}" > /dev/null <<'SQL'
 INSERT INTO usuarios (correo, rol, activo)
 VALUES (:'email', 'ADMIN', TRUE)
 ON CONFLICT (correo) DO UPDATE SET rol = 'ADMIN', activo = TRUE;
 SQL
-  else
-    echo "-- [bootstrap] BOOTSTRAP_ADMIN_EMAIL vacio: solo queda el ADMIN ancla de la semilla 069"
-  fi
 
   for seed in "${SEED_MIGRATIONS[@]}"; do
     seed_files=("${MIGRATIONS_DIR}"/"${seed}"-*.sql)

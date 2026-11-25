@@ -12,6 +12,10 @@ ARG NODE_VERSION=24.16.0
 FROM node:${NODE_VERSION}-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
+# Seguro antes del `COPY . .`: el package.json del backend no declara
+# `postinstall` ni `prepare`, y los install scripts de sus dependencias nativas
+# no leen `src/`. Si algun dia se anade un hook que dependa del codigo, hay que
+# usar `--ignore-scripts` aqui y lanzarlo despues del `COPY . .`.
 RUN npm ci
 
 # 2) Compilacion
@@ -26,6 +30,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+# Mismo razonamiento que en `deps`: ningun hook depende de `src/` ni de `dist/`.
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Como root: `--with-deps` instala con apt las librerias de Chromium. Usa la
@@ -40,5 +45,6 @@ COPY --from=build /app/dist ./dist
 RUN mkdir -p logs static/uploads && chown -R node:node logs static
 
 USER node
-EXPOSE 3000
+# Sin EXPOSE: el puerto lo fija PORT de `backend/.env` (main.ts) y lo publica
+# docker-compose.yml; un numero aqui seria un valor fijo que puede mentir.
 CMD ["node", "dist/main"]

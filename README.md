@@ -53,7 +53,7 @@ ln -s backend/.env .env
 # 3. Exportar el entorno a la terminal (MCP de PostgreSQL y psql). Una vez por terminal.
 set -a && source backend/.env && set +a
 
-# 4. PostgreSQL 16 en Docker (puerto del anfitrión: ${DB_PORT:-5433})
+# 4. PostgreSQL 16 en Docker (anfitrión ${POSTGRES_HOST_PORT} -> contenedor ${DB_PORT}; ver docs/INSTALACION_Y_ENTORNO.md §1.2)
 sudo docker compose up -d
 
 # 5. Dependencias: siempre `npm ci`, nunca `npm install` en un clonado limpio

@@ -41,11 +41,16 @@ const backendEnv = (() => {
   return fs.existsSync(envPath) ? dotenv.parse(fs.readFileSync(envPath)) : {};
 })();
 
-const FRONTEND_URL = (
-  process.env.PROTODO_FRONTEND_URL ??
-  backendEnv.FRONTEND_URL ??
-  "http://localhost:9000"
-).replace(/\/+$/, "");
+// Sin valor por defecto: la URL del panel sale de `backend/.env` (o del entorno).
+const FRONTEND_URL = (() => {
+  const url = process.env.PROTODO_FRONTEND_URL ?? backendEnv.FRONTEND_URL;
+  if (!url) {
+    throw new Error(
+      "Falta FRONTEND_URL: definela en backend/.env o exporta PROTODO_FRONTEND_URL",
+    );
+  }
+  return url.replace(/\/+$/, "");
+})();
 
 /**
  * Panel de vista real de la app. Opciones: `clip` (selector que se recorta;
@@ -725,9 +730,20 @@ const captureUi = async (page, panel, cache, slot) => {
 
 /** Consulta de solo lectura; `rows: null` si la BD no responde. */
 const runQuery = async (sql) => {
+  // Las credenciales salen de `backend/.env`, sin valores por defecto.
+  const missing = ["DB_HOST", "DB_PORT", "DB_USER", "DB_NAME"].filter(
+    (key) => !backendEnv[key],
+  );
+  if (missing.length > 0) {
+    console.warn(
+      `  aviso: consulta no disponible (faltan en backend/.env: ${missing.join(", ")})`,
+    );
+    return { columns: [], rows: null };
+  }
+
   const client = new Client({
-    host: backendEnv.DB_HOST ?? "localhost",
-    port: Number(backendEnv.DB_PORT ?? 5432),
+    host: backendEnv.DB_HOST,
+    port: Number(backendEnv.DB_PORT),
     user: backendEnv.DB_USER,
     password: backendEnv.DB_PASSWORD,
     database: backendEnv.DB_NAME,

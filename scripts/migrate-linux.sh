@@ -20,6 +20,10 @@
 # Si `E2E_DB_NAME` esta definida y esa base existe en el contenedor, se migra
 # tambien, para que la suite E2E no quede desfasada.
 #
+# Configuracion: solo `backend/.env` (scripts/lib/env.sh), sin valores por
+# defecto. `psql` dentro del contenedor usa el puerto interno (PGPORT = DB_PORT),
+# por eso no lleva `-p`.
+#
 # Uso:
 #   scripts/migrate-linux.sh
 #   scripts/migrate-linux.sh --baseline
@@ -38,29 +42,22 @@ fi
 
 cd "${REPO_ROOT}"
 
-# Lee `CLAVE=valor` de backend/.env sin ejecutarlo (quita comillas y CR).
-read_env_var() {
-  local key="$1"
-  [[ -f "${ENV_FILE}" ]] || return 0
-  (grep -E "^${key}=" "${ENV_FILE}" || true) | tail -n 1 | cut -d= -f2- | tr -d "\"'\r"
-}
+# shellcheck source=scripts/lib/env.sh
+source "${REPO_ROOT}/scripts/lib/env.sh"
 
-# El entorno manda sobre el archivo, como en apply-migrations.sh.
-DB_USER="${DB_USER:-$(read_env_var DB_USER)}"
-DB_NAME="${DB_NAME:-$(read_env_var DB_NAME)}"
-E2E_DB_NAME="${E2E_DB_NAME:-$(read_env_var E2E_DB_NAME)}"
-DB_USER="${DB_USER:-postgres}"
-DB_NAME="${DB_NAME:-protodo}"
+# Aborta con la lista de lo que falte. El entorno manda sobre el archivo.
+load_env_or_die "${ENV_FILE}" "${REQUIRED_ENV_VARS[@]}"
+# Opcional por contrato: sin ella simplemente no se migra la base E2E.
+E2E_DB_NAME="${E2E_DB_NAME:-$(read_env_var "${ENV_FILE}" E2E_DB_NAME)}"
 
-COMPOSE=(docker compose)
-[[ -f "${ENV_FILE}" ]] && COMPOSE+=(--env-file "${ENV_FILE}")
+COMPOSE=(docker compose --env-file "${ENV_FILE}")
 
 # `-T`: sin TTY, para poder alimentar la entrada estandar con cada archivo.
 psql_in() {
   local db="$1"
   shift
   "${COMPOSE[@]}" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 --quiet -U "${DB_USER}" -d "${db}" "$@"
+    psql -X -v ON_ERROR_STOP=1 --quiet -U "${DB_USER}" -d "${db}" "$@"
 }
 
 echo "== Esperando a PostgreSQL (pg_isready)"
@@ -69,7 +66,7 @@ until "${COMPOSE[@]}" exec -T postgres pg_isready -U "${DB_USER}" -d "${DB_NAME}
   attempt=$((attempt + 1))
   if (( attempt >= MAX_WAIT_ATTEMPTS )); then
     echo "PostgreSQL no responde tras $((MAX_WAIT_ATTEMPTS * 2)) s." >&2
-    echo "Revisa: docker compose ps  /  docker compose logs postgres" >&2
+    echo "Revisa: docker compose --env-file backend/.env ps  /  ... logs postgres" >&2
     exit 1
   fi
   sleep 2
@@ -77,7 +74,7 @@ done
 
 database_exists() {
   local db="$1"
-  [[ "$("${COMPOSE[@]}" exec -T postgres psql -tA -U "${DB_USER}" -d postgres \
+  [[ "$("${COMPOSE[@]}" exec -T postgres psql -X -tA -U "${DB_USER}" -d postgres \
         -v db="${db}" <<< "SELECT 1 FROM pg_database WHERE datname = :'db';")" == "1" ]]
 }
 

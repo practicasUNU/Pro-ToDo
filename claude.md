@@ -53,7 +53,7 @@ Pro-ToDo/
 | **Trazabilidad** | `winston`, `winston-daily-rotate-file` |
 | **Colas** | `bullmq`, `@nestjs/bullmq` |
 | **Tiempo real** | `socket.io`, `@nestjs/websockets`, `@nestjs/platform-socket.io` (backend), `socket.io-client` (frontend) — en uso desde PROT-32 (`NotificationGateway`, namespace `/events`, path `/api/socket.io`) |
-| **Infraestructura** | Docker Compose (PostgreSQL 16, puerto host `${DB_PORT:-5433}` → contenedor `5432`) |
+| **Infraestructura** | Docker Compose (PostgreSQL 16, puerto host `${POSTGRES_HOST_PORT}` → contenedor `${DB_PORT}`, ambos `5433` en la plantilla; toda la configuración en `backend/.env`, sin defaults en Git) |
 
 > Nota: `backend/.env.example` declara `PORT=5000` para la API pero `ASSETS_BASE_URL=http://localhost:3000/...` — inconsistencia real del archivo de entorno, no de esta tabla. Revisar antes de asumir el puerto de assets.
 

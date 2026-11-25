@@ -99,8 +99,8 @@ el perfil `app` y tiene su propia sección (§2.5); la guía de instalación par
 ### 2.1 Requisitos previos
 
 - Symlink `.env` → `backend/.env` en la raíz (ver §1.1).
-- Variables en `backend/.env`: `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `DB_NAME`.
-- El puerto se publica como `${DB_PORT:-5433}:5432`: por defecto **5433** en el anfitrión, 5432 dentro del contenedor.
+- Variables en `backend/.env` (obligatorias, sin valores por defecto en `docker-compose.yml`): `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `DB_NAME`, `POSTGRES_HOST_PORT`, `BOOTSTRAP_ADMIN_EMAIL` y el resto de la lista de [`INSTALACION_Y_ENTORNO.md` §1.2](INSTALACION_Y_ENTORNO.md#12-configuración-centralizada-en-backendenv). Compose interpola el archivo entero, así que también las necesita `docker compose up -d` sin perfil.
+- El puerto se publica como `${POSTGRES_HOST_PORT}:${DB_PORT}`: `DB_PORT` es el puerto **interno** del contenedor (`PGPORT`) y `POSTGRES_HOST_PORT` el del anfitrión. Para el desarrollo en el anfitrión deben coincidir (la plantilla trae **5433** en ambos).
 
 > 🔐 **Sobre `sudo`:** en este entorno el socket de Docker no es accesible para el usuario (`permission denied ... /var/run/docker.sock`), de modo que los comandos van con `sudo`, igual que en las cabeceras de `db/migrations/*.sql`. Si tu usuario pertenece al grupo `docker`, omítelo.
 
