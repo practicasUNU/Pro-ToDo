@@ -9571,3 +9571,15 @@ mapeador.
 - **Que no cambia:** el asterisco de `{{*parsed_email.clean_body}}` sigue siendo la marca obligatoria. El caso real sin expediente se sigue parando en el escudo, ahora con `ERR_POST_IA_EMPTY_HTML` sobre `llm_response.headline` / `summary` (unitaria 12.2 y e2e 8.3bis).
 - **Estado observado en desarrollo:** `Cierre Licitacion Remoto` ya estaba editado a mano en TEXT con `sourceFields: ["headline"]`. Como no estaba en JSON, la normalizacion no lo toca.
 - [ ] Pendiente de negocio: que los correos de cierre incluyan el codigo de expediente
+
+## Documentacion en `docs/` y stack Docker portable
+
+- **Por que no se movieron `claude.md`, `PLAN.md` ni `Walkthrough.md`:** `system-prompt.md` exige los dos ultimos en la raiz y `claude.md` es el indice canonico de reglas que carga el asistente. Solo se movieron los documentos operativos.
+- **Por que Node 24.16.0 y no 20 en las imagenes:** `.nvmrc`, ambos `engines` y `dependency-security.md` §3 fijan la 24.16.0; una imagen con 20 daria `EBADENGINE` y probaria un runtime distinto del que se despliega.
+- **Por que los scripts NO ejecutan las 69 migraciones en cada arranque:** `init.sql` es el acumulado final. Encadenar la historia sobre el falla (002/005/009 no aplican; 035-038 rotas) y con `ON_ERROR_STOP=1` el primer arranque se pararia. Se reutiliza el contrato de `apply-migrations.sh` (`schema_migrations`) y el volumen nuevo nace en baseline, igual que `db:bootstrap`.
+- **Por que el bootstrap va en `docker-entrypoint-initdb.d`:** Docker solo lo ejecuta con el volumen vacio, que es exactamente "base recien creada desde `init.sql`". Detectarlo desde fuera exigiria heuristicas (tablas vacias, ausencia de `schema_migrations`) que confundirian una base vieja sin adoptar con una nueva.
+- **Por que un perfil `app`:** sin perfil, `docker compose up -d` habria pasado a compilar backend y frontend y a ocupar el 3000, rompiendo el desarrollo con `npm run start:dev`.
+- **Por que `X-Forwarded-For $remote_addr` (sobrescribe) en Nginx:** el backend toma la primera IP de esa cabecera para el perimetro; encadenarla (`$proxy_add_x_forwarded_for`) dejaria que un cliente inyectara una IP autorizada delante.
+- **Por que la subred fija:** tras Nginx el backend ve la pasarela de `protodo_net`. Con subred fija se puede nombrar en `ALLOWED_IP_RANGES`; en Docker Desktop (Windows) esto implica que el perimetro no distingue clientes de la LAN, por eso el panel se publica por defecto solo en `127.0.0.1`.
+- **Por que los `.bat` sin expansion retardada ni `for /f` sobre SQL:** `!` en un secreto del `.env` se corromperia, y las comillas/parentesis del SQL dentro de `for /f` son fragiles. Las consultas se vuelcan a un temporal y se leen con `set /p`; la lista de aplicadas se consulta una vez y se busca con `findstr /x /l`.
+- [ ] Prueba real del perfil `app` y de los `.bat` (ver PLAN)

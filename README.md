@@ -8,13 +8,27 @@ Plataforma de automatización y orquestación basada en una máquina de estados 
 Pro-ToDo/
 ├── backend/    # API NestJS + PostgreSQL, motor FSM y estrategias de nodos
 ├── frontend/   # SPA Vue 3 + Quasar
-├── db/         # Migraciones SQL versionadas (db/migrations/NNN-*.sql)
-├── scripts/    # apply-migrations.sh, bootstrap-db.sh, with-test-env.sh
+├── db/         # Migraciones SQL (db/migrations/NNN-*.sql) y bootstrap del volumen (db/docker-init/)
+├── docs/       # Documentación operativa (comandos, instalación, dependencias, pruebas)
+├── scripts/    # setup/migrate (-linux.sh / -windows.bat), apply-migrations.sh, bootstrap-db.sh…
 ├── init.sql    # Esquema completo (lo ejecuta Docker en un volumen vacío)
 └── .claude/    # Reglas, skills y comandos del asistente
 ```
 
-No hay `package.json` en la raíz: `backend/` y `frontend/` son proyectos Node.js independientes. La referencia operativa completa de comandos está en [COMMANDS.md](COMMANDS.md); la arquitectura y las reglas del proyecto, en [claude.md](claude.md).
+No hay `package.json` en la raíz: `backend/` y `frontend/` son proyectos Node.js independientes. La referencia operativa completa de comandos está en [docs/commands.md](docs/commands.md); la arquitectura y las reglas del proyecto, en [claude.md](claude.md).
+
+## Documentación
+
+| Documento | Contenido |
+|---|---|
+| [docs/INSTALACION_Y_ENTORNO.md](docs/INSTALACION_Y_ENTORNO.md) | Instalación en **Linux y Windows**, puertos, proxy inverso (Apache/Nginx) y stack completo en Docker |
+| [docs/commands.md](docs/commands.md) | Referencia operativa de comandos (Docker, migraciones, backend, frontend, Git) |
+| [docs/PRODUCTION_DEPS_GUIDE.md](docs/PRODUCTION_DEPS_GUIDE.md) | Dependencias, lockfiles, Dockerfiles y auditoría |
+| [docs/GUIA_PRUEBAS_MALA_LECHE.md](docs/GUIA_PRUEBAS_MALA_LECHE.md) | Pruebas hostiles (CLI, HTTP y UI) |
+
+**Arranque rápido del stack completo en contenedores** (sin Node.js en el anfitrión):
+`scripts/setup-linux.sh` en Linux o `scripts\setup-windows.bat` en Windows. La sección siguiente
+describe el modo desarrollo, con backend y frontend en el anfitrión.
 
 ## Requisitos
 
@@ -63,7 +77,7 @@ npm run db:bootstrap --prefix backend    # base nueva: esquema + baseline + ADMI
 npm run db:migrate --prefix backend      # después: aplica solo las migraciones pendientes
 ```
 
-No hacen falta bucles manuales de semillas tras el bootstrap. Más detalle en [COMMANDS.md §3.1.2](COMMANDS.md#312-crear-una-base-desde-cero).
+No hacen falta bucles manuales de semillas tras el bootstrap. Más detalle en [docs/commands.md §3.1.2](docs/commands.md#312-crear-una-base-desde-cero).
 
 ### Arranque
 

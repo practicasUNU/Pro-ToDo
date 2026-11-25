@@ -5394,3 +5394,15 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo: 0 escudos en JSON o con `jsonSchema`
 - [x] Regresion TEXT/HTML (unitaria bloque 12, e2e 8.3bis en TEXT y 14.4ter). Backend 3346 unitarias y 155/155 e2e; frontend 1806 y `vue-tsc` limpio
 - [ ] Negocio: el correo de cierre debe identificar el expediente
+
+## Documentacion en `docs/` y stack Docker portable (Linux / Windows)
+
+- **Documentacion:** `COMMANDS.md` -> `docs/commands.md` y `GUIA_PRUEBAS_MALA_LECHE.md` -> `docs/`. En la raiz quedan `README.md`, `claude.md`, `PLAN.md` y `Walkthrough.md` (los tres ultimos los exigen `system-prompt.md` e `index.md`). Cada `.md` de `docs/` abre con `## Índice` (anclas estilo GitHub). Nueva guia `docs/INSTALACION_Y_ENTORNO.md`: puertos, perimetro en Docker, proxy Apache2/Nginx, Linux y Windows.
+- **Compose:** sin perfil sigue levantando solo `postgres` (desarrollo diario intacto). El perfil `app` anade `redis` (7-alpine), `backend` y `frontend`. Red `protodo_net` con subred fija `172.28.0.0/16`, que el compose suma a `ALLOWED_IP_RANGES`. Backend y Redis solo en `127.0.0.1`; frontend en `127.0.0.1:8080` salvo `FRONTEND_BIND_ADDRESS`.
+- **Postgres:** `healthcheck` con `pg_isready`. Volumen nuevo = `01-init.sql` + `db/docker-init/02-bootstrap.sh` (baseline de `schema_migrations`, ADMIN de `BOOTSTRAP_ADMIN_EMAIL`, semilla 069). `db/migrations` montado en `/migrations:ro`.
+- **Imagenes:** `backend/Dockerfile` multi-stage `node:24.16.0-bookworm-slim` + `npx playwright install --with-deps chromium`, usuario `node`. `frontend/Dockerfile` compila con `VITE_API_BASE_URL=/api` y sirve con `nginx:stable-alpine`; `frontend/nginx.conf` enruta `/api/` (incluido `/api/socket.io` con upgrade) y `/static/uploads/`.
+- **Scripts:** `scripts/setup-linux.sh` / `scripts/setup-windows.bat` (Docker -> winget/Docker Desktop -> `.env` -> `up -d --build` -> migraciones) y `scripts/migrate-linux.sh` / `scripts/migrate-windows.bat` (`docker compose exec -T postgres psql`, control `schema_migrations`, `--baseline`, E2E si existe).
+- **`.gitattributes`:** LF para `.sh`, `.sql`, `Dockerfile*`, `.conf`, `.yml`, `.env*`; CRLF para `.bat`/`.cmd`.
+- [x] `docker compose config` (sin perfil y con `--profile app`), `bash -n` de los `.sh`, anclas de los indices validadas
+- [ ] Probar el stack completo (`scripts/setup-linux.sh`) con acceso al socket de Docker
+- [ ] Probar `setup-windows.bat` / `migrate-windows.bat` en un Windows 10/11 real

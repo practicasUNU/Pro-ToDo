@@ -909,7 +909,7 @@ describe('14. Reset total (--all)', () => {
   it('14.4 NO deberia tocar los paneles de universidad contenedores', () => {
     // 1. Arrange 📐: `--all` desactiva la preservacion de comites, no el
     //    acotamiento al segundo nivel. La pagina se queda sin inyecciones,
-    //    pero con su estructura de universidades intacta (COMMANDS.md §6.4).
+    //    pero con su estructura de universidades intacta (docs/commands.md §6.4).
     const html = page('accordionESIC', injected('ESIC 2'));
 
     // 2. Act ⚙️

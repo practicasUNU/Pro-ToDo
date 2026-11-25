@@ -1,10 +1,52 @@
-# COMMANDS.md — Referencia Operativa de Comandos (Proto-Do)
+# docs/commands.md — Referencia Operativa de Comandos (Proto-Do)
 
 Manual operativo unificado del monorepo: carga de entorno, infraestructura Docker, migraciones SQL, backend NestJS, frontend Quasar, scripts de mantenimiento del sandbox y flujo de Git.
 
 Documento vivo — actualizar ante cualquier script nuevo en `backend/package.json`, `frontend/package.json` o `.claude/commands/`.
 
 > **No existe `package.json` en la raíz del repositorio.** No hay orquestador de workspaces: cada paquete se gestiona desde su propio directorio (`backend/`, `frontend/`). Todo comando `npm` de este documento indica desde dónde se ejecuta.
+
+## Índice
+
+- [1. Carga de Variables de Entorno](#1-carga-de-variables-de-entorno)
+  - [1.1 Exportar backend/.env a la sesión actual](#11-exportar-backendenv-a-la-sesión-actual)
+  - [1.2 Override transitorio para una sola ejecución](#12-override-transitorio-para-una-sola-ejecución)
+- [2. Infraestructura y Base de Datos (Docker · PostgreSQL 16)](#2-infraestructura-y-base-de-datos-docker--postgresql-16)
+  - [2.1 Requisitos previos](#21-requisitos-previos)
+  - [2.2 Ciclo de vida del contenedor](#22-ciclo-de-vida-del-contenedor)
+  - [2.3 Acceso interactivo a psql](#23-acceso-interactivo-a-psql)
+  - [2.4 Automatización vía slash command](#24-automatización-vía-slash-command)
+  - [2.5 Stack completo en Docker (perfil app)](#25-stack-completo-en-docker-perfil-app)
+- [3. Migraciones de Base de Datos](#3-migraciones-de-base-de-datos)
+  - [3.1 Aplicar una migración](#31-aplicar-una-migración)
+  - [Verificación del backend antes de cerrar un cambio](#verificación-del-backend-antes-de-cerrar-un-cambio)
+  - [3.1.1 Aplicarlas con control de estado (recomendado)](#311-aplicarlas-con-control-de-estado-recomendado)
+  - [3.1.2 Crear una base desde cero](#312-crear-una-base-desde-cero)
+  - [3.2 Crear una migración nueva](#32-crear-una-migración-nueva)
+- [4. Backend (NestJS 🦁) — backend/](#4-backend-nestjs---backend)
+  - [4.1 Ejecución](#41-ejecución)
+  - [4.2 Calidad y tipos](#42-calidad-y-tipos)
+  - [4.3 Pruebas (Jest, patrón AAA)](#43-pruebas-jest-patrón-aaa)
+    - [4.3.1 Base de las pruebas E2E (E2E_DB_NAME)](#431-base-de-las-pruebas-e2e-e2e_db_name)
+- [5. Frontend (Vue 3 + Quasar ⚡) — frontend/](#5-frontend-vue-3--quasar---frontend)
+  - [5.1 Ejecución y build](#51-ejecución-y-build)
+  - [5.2 Calidad y tipos](#52-calidad-y-tipos)
+  - [5.3 Pruebas (Vitest)](#53-pruebas-vitest)
+  - [5.4 Variables de entorno](#54-variables-de-entorno)
+- [6. Scripts Manuales y Mantenimiento del Sandbox](#6-scripts-manuales-y-mantenimiento-del-sandbox)
+  - [6.1 drupal:cleanup — limpieza de la página de títulos](#61-drupalcleanup--limpieza-de-la-página-de-títulos)
+    - [Reset total (--all / --force-all)](#reset-total---all----force-all)
+  - [6.2 drupal:clean — purga quirúrgica](#62-drupalclean--purga-quirúrgica)
+  - [6.3 drupal:inject — inyección de marcado](#63-drupalinject--inyección-de-marcado)
+  - [6.4 Regla de oro de los selectores](#64-regla-de-oro-de-los-selectores)
+- [7. Control de Versiones (Git Flow)](#7-control-de-versiones-git-flow)
+  - [7.1 Metodología](#71-metodología)
+  - [7.2 Conventional Commits y coincidencia de scope](#72-conventional-commits-y-coincidencia-de-scope)
+  - [7.3 Los hooks no se distribuyen](#73-los-hooks-no-se-distribuyen)
+  - [7.4 Trabajo diario](#74-trabajo-diario)
+  - [7.5 Empujar todas las ramas locales excluyendo feat/trigger-imap-tests](#75-empujar-todas-las-ramas-locales-excluyendo-feattrigger-imap-tests)
+- [8. Comandos del Asistente (.claude/commands/)](#8-comandos-del-asistente-claudecommands)
+- [9. Resumen Rápido (Quickstart)](#9-resumen-rápido-quickstart)
 
 ---
 
@@ -49,6 +91,11 @@ Es la vía preferida frente a editar `backend/.env` cuando el cambio es puntual:
 
 PostgreSQL corre exclusivamente dentro del contenedor `protodo_postgres` (`docker-compose.yml`, raíz). Prohibido depender de una instalación nativa o de un socket Unix del anfitrión (`security-and-scope.md` §0).
 
+`docker compose up -d` sin perfil levanta **solo PostgreSQL**, que es lo que necesita el desarrollo
+diario con `npm run start:dev`. El stack completo (Redis, backend y frontend en contenedores) va tras
+el perfil `app` y tiene su propia sección (§2.5); la guía de instalación para Linux y Windows está en
+[`docs/INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md).
+
 ### 2.1 Requisitos previos
 
 - Symlink `.env` → `backend/.env` en la raíz (ver §1.1).
@@ -67,7 +114,14 @@ PostgreSQL corre exclusivamente dentro del contenedor `protodo_postgres` (`docke
 | Logs en vivo | `sudo docker compose logs -f postgres` |
 | Reiniciar sin pérdida de datos | `sudo docker compose restart postgres` |
 
-En el primer arranque sobre un volumen vacío, Postgres ejecuta `init.sql` desde `docker-entrypoint-initdb.d`.
+En el primer arranque sobre un volumen vacío, Postgres ejecuta desde `docker-entrypoint-initdb.d`:
+
+1. `01-init.sql` (montaje de `init.sql`): el esquema final.
+2. `02-bootstrap.sh` (montaje de `db/docker-init/02-bootstrap.sh`): crea `schema_migrations` y
+   registra todas las migraciones en modo baseline, siembra el ADMIN de `BOOTSTRAP_ADMIN_EMAIL` (si
+   está definido) y aplica la semilla `069`. Es el mismo resultado que `npm run db:bootstrap` (§3.1.2).
+
+Sobre un volumen que ya existe, ninguno de los dos vuelve a ejecutarse.
 
 > ⚠️ **Comando destructivo — pérdida total de datos:**
 > ```bash
@@ -87,6 +141,23 @@ Las llaves con `:?` abortan con el mensaje indicado si la variable no está expo
 ### 2.4 Automatización vía slash command
 
 `/docker-db <accion>` (`.claude/commands/docker-db.md`) mapea `up | down | restart | status | reset` a los comandos anteriores, exigiendo confirmación expresa antes de `reset`.
+
+### 2.5 Stack completo en Docker (perfil `app`)
+
+| Acción | Linux | Windows (CMD / PowerShell / doble clic) |
+|---|---|---|
+| Instalar, arrancar y migrar | `scripts/setup-linux.sh` | `scripts\setup-windows.bat` |
+| Solo migraciones pendientes | `scripts/migrate-linux.sh` | `scripts\migrate-windows.bat` |
+| Adoptar una base ya migrada | `scripts/migrate-linux.sh --baseline` | `scripts\migrate-windows.bat --baseline` |
+| Arrancar a mano | `docker compose --env-file backend/.env --profile app up -d --build` | ídem con `backend\.env` |
+| Detener (conserva volúmenes) | `docker compose --env-file backend/.env --profile app down` | ídem |
+
+- Panel en `http://localhost:8080`; Nginx enruta `/api` y `/api/socket.io` al contenedor `backend`.
+- Los scripts de migración usan `docker compose exec -T postgres psql`: no requieren `psql` en el
+  anfitrión y llevan la cuenta en `schema_migrations`, igual que `scripts/apply-migrations.sh`
+  (§3.1.1), que sigue disponible para quien use el `psql` del anfitrión.
+- Puertos, variables que sobrescribe el `docker-compose.yml` y resolución de problemas:
+  [`docs/INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md).
 
 ---
 
@@ -174,9 +245,10 @@ npm run db:bootstrap --prefix backend                 # usa DB_NAME
 npm run test:bootstrap --prefix backend               # usa E2E_DB_NAME (ver §4.3.1)
 ```
 
-Si el volumen nació vacío, el primer `docker compose up -d` ya creó `DB_NAME` desde `init.sql`
-(sin ADMIN ni `schema_migrations`) y `db:bootstrap` abortará con «ya existe»: como esa base está
-vacía, se borra con el `DROP DATABASE` que imprime el propio script y se relanza.
+Si el volumen nació vacío, el primer `docker compose up -d` ya dejó `DB_NAME` bootstrapeada
+(`init.sql` + `db/docker-init/02-bootstrap.sh`, ver §2.2): `db:bootstrap` abortará con «ya existe» y
+**no hace falta**. Sigue siendo el camino para crear la base de E2E (`test:bootstrap`) o cualquier
+otra base adicional sobre un volumen existente.
 
 Ejecuta `init.sql`, registra las migraciones en modo baseline, siembra un ADMIN activo
 (`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`) y carga las semillas de contenido (ver abajo). Aborta si la base ya existe: recrearla
@@ -572,6 +644,7 @@ Slash commands invocables en Claude Code. Cada uno exige validaciones antes de t
 set -a && source backend/.env && set +a
 
 # 1. Infraestructura y dependencias (npm ci, nunca npm install en limpio)
+#    (stack completo en contenedores: scripts/setup-linux.sh, ver §2.5)
 sudo docker compose up -d
 (cd backend && npm ci) && (cd frontend && npm ci)
 

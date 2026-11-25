@@ -436,7 +436,7 @@ describe('drupal-cleanup · purga quirurgica', () => {
     it('6.7 NO deberia alcanzar el panel de la universidad contenedor', () => {
       // 1. Arrange 📐: el selector lo escribe el operador, pero la prueba fija
       //    que el acotamiento al segundo nivel hace su trabajo tambien por
-      //    esta via. Ver COMMANDS.md §6.4.
+      //    esta via. Ver docs/commands.md §6.4.
       // 2. Act ⚙️
       const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 1);
 

@@ -32,7 +32,7 @@ import type { INestApplication } from '@nestjs/common';
 import type { App } from 'supertest/types';
 
 /**
- * Pruebas "a mala leche" de la frontera HTTP (GUIA_PRUEBAS_MALA_LECHE.md).
+ * Pruebas "a mala leche" de la frontera HTTP (docs/GUIA_PRUEBAS_MALA_LECHE.md).
  *
  * Contra PostgreSQL REAL y con el `ValidationPipe` de produccion: lo que se
  * prueba aqui —que un `sortBy` hostil no llega al SQL, que el relevo de tarifas

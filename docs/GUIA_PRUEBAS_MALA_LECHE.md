@@ -6,11 +6,9 @@ funciona. Cada escenario indica el objetivo, el ataque listo para copiar, el res
 la prueba automatizada que lo cubre. Si una prueba da otro resultado, hay un defecto. No se
 ajusta la guía para que cuadre.
 
-Está organizada en tres secciones operativas:
-
-1. [Pruebas automatizadas (terminal / CLI)](#1-pruebas-automatizadas-terminal--cli)
-2. [Pruebas de red y seguridad (cURL / HTTP)](#2-pruebas-de-red-y-seguridad-curl--http)
-3. [Pruebas manuales de interfaz de usuario](#3-pruebas-manuales-de-interfaz-de-usuario)
+Está organizada en tres secciones operativas: pruebas automatizadas (terminal / CLI), pruebas de
+red y seguridad (cURL / HTTP) y pruebas manuales de interfaz de usuario. El [Índice](#índice) enlaza
+cada escenario.
 
 **Stack real que se prueba.** Backend NestJS 11 sobre Express (`@nestjs/platform-express`), con
 TypeORM sobre PostgreSQL (driver `pg`), `class-validator` + `ValidationPipe` global con
@@ -34,6 +32,31 @@ TypeORM sobre PostgreSQL (driver `pg`), `class-validator` + `ValidationPipe` glo
 > export API=http://localhost:3100/api
 > export TOKEN='<access token>'
 > ```
+
+## Índice
+
+- [1. Pruebas automatizadas (terminal / CLI)](#1-pruebas-automatizadas-terminal--cli)
+  - [1.1 Baterías completas](#11-baterías-completas)
+  - [1.2 Suites de borde, una a una](#12-suites-de-borde-una-a-una)
+  - [1.3 Datos de prueba: resguardo y purga](#13-datos-de-prueba-resguardo-y-purga)
+- [2. Pruebas de red y seguridad (cURL / HTTP)](#2-pruebas-de-red-y-seguridad-curl--http)
+  - [2.1 Desbordamiento de payload (10 MB frente a 100 KB)](#21-desbordamiento-de-payload-10-mb-frente-a-100-kb)
+  - [2.2 SSRF: destinos en redes privadas](#22-ssrf-destinos-en-redes-privadas)
+  - [2.3 Cabeceras prohibidas y nombres hostiles en el destino HTTP](#23-cabeceras-prohibidas-y-nombres-hostiles-en-el-destino-http)
+  - [2.4 Errores 400 del login (OTP)](#24-errores-400-del-login-otp)
+  - [2.5 Inyección SQL por el orden (sortBy / sortOrder)](#25-inyección-sql-por-el-orden-sortby--sortorder)
+  - [2.6 Límites de tasa (rate limiting)](#26-límites-de-tasa-rate-limiting)
+  - [2.7 Revocación inmediata del JWT (tokenVersion)](#27-revocación-inmediata-del-jwt-tokenversion)
+  - [2.8 Tarifas de IA: el relevo nunca queda a medias](#28-tarifas-de-ia-el-relevo-nunca-queda-a-medias)
+  - [2.9 Desbordamiento de búsquedas y parámetros](#29-desbordamiento-de-búsquedas-y-parámetros)
+  - [2.10 XSS en prompts y plantillas](#210-xss-en-prompts-y-plantillas)
+- [3. Pruebas manuales de interfaz de usuario](#3-pruebas-manuales-de-interfaz-de-usuario)
+  - [3.1 Menú de accesibilidad en móvil](#31-menú-de-accesibilidad-en-móvil)
+  - [3.2 Banco de pruebas de nodos (/nodos/config-sandbox)](#32-banco-de-pruebas-de-nodos-nodosconfig-sandbox)
+  - [3.3 Tiempo real por WebSocket (sin F5)](#33-tiempo-real-por-websocket-sin-f5)
+  - [3.4 Presets del destino HTTP genérico](#34-presets-del-destino-http-genérico)
+  - [3.5 Filtro de asunto del disparador IMAP](#35-filtro-de-asunto-del-disparador-imap)
+  - [3.6 El aviso de 5 segundos y las entradas numéricas (/precios)](#36-el-aviso-de-5-segundos-y-las-entradas-numéricas-precios)
 
 ---
 

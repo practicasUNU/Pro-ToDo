@@ -7,6 +7,19 @@ de cada paquete y cómo se audita la cadena de suministro.
 Ámbito: `backend/` (NestJS) y `frontend/` (Quasar/Vite), dos proyectos con su propio
 `package.json` y `package-lock.json`. No hay `package.json` en la raíz.
 
+## Índice
+
+- [1. Determinismo](#1-determinismo)
+- [2. Integridad (SHA-512)](#2-integridad-sha-512)
+- [3. Runtime de Node.js](#3-runtime-de-nodejs)
+- [4. Contenedores Docker multi-stage (referencia)](#4-contenedores-docker-multi-stage-referencia)
+  - [Backend (NestJS)](#backend-nestjs)
+  - [Frontend (Quasar SPA)](#frontend-quasar-spa)
+- [5. Auditoría en CI/CD](#5-auditoría-en-cicd)
+- [6. Parches locales y overrides](#6-parches-locales-y-overrides)
+- [7. Excepciones vigentes](#7-excepciones-vigentes)
+  - [Moderadas revisadas (no bloquean)](#moderadas-revisadas-no-bloquean)
+
 ---
 
 ## 1. Determinismo
@@ -70,9 +83,14 @@ con build y tests en verde.
 
 ## 4. Contenedores Docker multi-stage (referencia)
 
-El repo aún no incluye Dockerfiles de aplicación. Esta es la plantilla de referencia para cuando se
-añadan. Separa la instalación, la compilación y el runtime para que la imagen final no contenga
-dependencias de desarrollo, código fuente ni herramientas de build.
+Los Dockerfiles reales son [`backend/Dockerfile`](../backend/Dockerfile) y
+[`frontend/Dockerfile`](../frontend/Dockerfile), orquestados por el perfil `app` de
+`docker-compose.yml` (ver [`INSTALACION_Y_ENTORNO.md`](INSTALACION_Y_ENTORNO.md)). Esta es la
+plantilla mínima de la que parten. Separa la instalación, la compilación y el runtime para que la
+imagen final no contenga dependencias de desarrollo, código fuente ni herramientas de build.
+
+> El backend real usa `node:24.16.0-bookworm-slim` en vez de `-alpine` en el runtime: Playwright
+> (`EXTRACTOR_WEB`) necesita Chromium y sus librerías glibc, que Alpine (musl) no ofrece.
 
 ### Backend (NestJS)
 
